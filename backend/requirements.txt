@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+pytesseract
+opencv-python
+numpy
+python-multipart
+openai
+python-dotenv
+pdf2image
+Pillow
+psycopg2-binary
+alembic
