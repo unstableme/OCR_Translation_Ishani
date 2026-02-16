@@ -217,7 +217,7 @@ const Dashboard = () => {
                 <div className="header-content container">
                     <div className="logo-section">
                         <TamangTranslationIcon className="logo-icon" size={32} />
-                        <h1 className="logo-text">TransLate<span className="text-accent">AI</span></h1>
+                        <h1 className="logo-text">Nep<span className="text-accent">Text</span></h1>
                     </div>
                     <div className="user-profile">
                         <div className="avatar">A</div>
