@@ -1,11 +1,35 @@
 import React, { useState, useRef } from 'react';
-import { Upload, FileText, Check, AlertCircle, RefreshCw, ArrowRight, Languages, Download } from 'lucide-react';
+import { Upload, FileText, Check, AlertCircle, RefreshCw, ArrowRight, Download } from 'lucide-react';
 import axios from 'axios';
 import { notoDevanagari } from '../fonts/NotoSansDevanagari';
 import { jsPDF } from 'jspdf';
 import './Dashboard.css';
 
 const API_BASE_URL = `http://${window.location.hostname}:8000`;
+
+const TamangTranslationIcon = ({ size = 24, className = "" }) => (
+    <svg
+        width={size}
+        height={size}
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        className={className}
+    >
+        {/* Background 'page' with Devanagari 'अ' */}
+        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+        <text x="4" y="11" fontSize="9" strokeWidth="0.5" fill="currentColor" style={{ fontFamily: 'serif', fontWeight: 'bold' }}>अ</text>
+
+        {/* Foreground 'page' with Latin 'A' */}
+        <path d="m22 22-5-10-5 10" />
+        <path d="M14 18h6" />
+        <path d="M12 11h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-9a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2z" fill="none" />
+        <text x="14" y="21" fontSize="10" strokeWidth="0.5" fill="currentColor" style={{ fontFamily: 'Arial', fontWeight: 'bold' }}>A</text>
+    </svg>
+);
 
 const LOADING_MESSAGES = [
     "Initializing AI processing...",
@@ -33,7 +57,7 @@ const LoadingState = () => {
                 {[...Array(5)].map((_, i) => (
                     <div key={i} className="scan-line" style={{ animationDelay: `${i * 0.5}s` }}></div>
                 ))}
-                <Languages size={80} className="floating-icon" />
+                <TamangTranslationIcon size={80} className="floating-icon" />
             </div>
             <div className="loading-status-area">
                 <div className="status-text-wrapper">
@@ -101,7 +125,10 @@ const Dashboard = () => {
     };
 
     const handleUpload = async () => {
-        if (!file) return;
+        if (!file) {
+            setError('Please upload a document or use the sample document first.');
+            return;
+        }
 
         setLoading(true);
         setError(null);
@@ -189,7 +216,7 @@ const Dashboard = () => {
             <header className="dashboard-header glass-panel">
                 <div className="header-content container">
                     <div className="logo-section">
-                        <Languages className="logo-icon" size={32} />
+                        <TamangTranslationIcon className="logo-icon" size={32} />
                         <h1 className="logo-text">TransLate<span className="text-accent">AI</span></h1>
                     </div>
                     <div className="user-profile">
@@ -246,7 +273,7 @@ const Dashboard = () => {
                             <button
                                 className="btn btn-primary w-full mt-4"
                                 onClick={handleUpload}
-                                disabled={!file || loading}
+                                disabled={loading}
                             >
                                 {loading ? (
                                     <>
@@ -317,7 +344,7 @@ const Dashboard = () => {
                                 </div>
                             ) : (
                                 <div className="empty-state">
-                                    <Languages size={64} className="empty-icon" />
+                                    <TamangTranslationIcon size={64} className="empty-icon" />
                                     <p>Upload a document to see the translation results here.</p>
                                 </div>
                             )}
