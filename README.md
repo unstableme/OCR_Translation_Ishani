@@ -27,5 +27,57 @@ The easiest way to run the entire stack is using Docker Compose.
 ## Local Development (Manual)
 
 ### 1. Backend Setup
-... [previous instructions] ...
 
+Navigate to the `backend` directory:
+```bash
+cd backend
+```
+
+Create and activate a virtual environment:
+```bash
+# Windows
+python -m venv venv
+.\venv\Scripts\activate
+
+# Mac/Linux
+python3 -m venv venv
+source venv/bin/activate
+```
+
+Install dependencies:
+```bash
+pip install -r requirements.txt
+```
+
+Run the server:
+```bash
+uvicorn main:app --reload
+```
+The backend will run at `http://localhost:8000`.
+
+### 2. Frontend Setup
+
+Open a new terminal and navigate to the `frontend` directory:
+```bash
+cd frontend
+```
+
+Install dependencies:
+```bash
+npm install
+```
+
+Run the development server:
+```bash
+npm run dev
+```
+The frontend will run at `http://localhost:5173`.
+
+## Usage
+
+1. Open `http://localhost:5173`.
+2. Login with any credentials (Mock Login).
+3. Drag & drop an image or PDF.
+4. Click **Translate Document**.
+5. View the original extracted text and the translated Nepali text.
+6. Download the result as a PDF.
