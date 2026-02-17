@@ -43,7 +43,7 @@ class OCREngine:
 
     def __init__(
         self,
-        lang: str = "nep+hin+eng",
+        lang: str = "nep+eng",  # Nepali covers Devanagari script for Tamang/Newari; eng for English.
         tesseract_config: str = "--psm 3",
         poppler_path: Optional[str] = None,
     ):
@@ -88,10 +88,11 @@ class OCREngine:
 
         if ext in SUPPORTED_PDF_EXTENSIONS:
             logger.info("Processing PDF: %s", file_path)
-            return self._process_pdf(str(path))
+            return self._process_pdf(str(path), return_list=True)
         else:
             logger.info("Processing image: %s", file_path)
-            return self._extract_from_image(str(path))
+            extracted = self._extract_from_image(str(path))
+            return [extracted]  # Return as list for consistency with parallel processing
 
     # ------------------------------------------------------------------
     # Image OCR
@@ -158,13 +159,17 @@ class OCREngine:
             ) from exc
 
         try:
-            kwargs = {"pdf_path": pdf_path}
+            kwargs = {
+                "pdf_path": pdf_path,
+                "dpi": 150,          # 150 DPI is faster and often sufficient for clear OCR
+                "thread_count": 4,   # Use multiple CPU cores for conversion
+            }
             if self.poppler_path:
                 kwargs["poppler_path"] = self.poppler_path
 
             images = convert_from_path(**kwargs)
             logger.info(
-                "Converted PDF to %d page image(s)", len(images)
+                "Converted PDF to %d page image(s) at 150 DPI", len(images)
             )
             return images
 
@@ -173,27 +178,36 @@ class OCREngine:
                 f"Failed to convert PDF to images: {exc}"
             ) from exc
 
-    def _process_pdf(self, pdf_path: str) -> str:
+    def _process_pdf(self, pdf_path: str, return_list: bool = False) -> str | list[str]:
         """
-        Convert a PDF to images, run OCR on each page, and return the
-        concatenated text.
+        Convert a PDF to images, run OCR on each page in parallel, and return
+        the results.
         """
-        images = self._convert_pdf_to_images(pdf_path)
-        page_texts: list[str] = []
+        from concurrent.futures import ThreadPoolExecutor
 
-        for page_num, pil_img in enumerate(images, start=1):
-            logger.info("Running OCR on page %d / %d", page_num, len(images))
+        images = self._convert_pdf_to_images(pdf_path)
+        num_pages = len(images)
+        
+        max_workers = min(num_pages, 8) # Increased workers for faster page processing
+
+        logger.info("Starting parallel OCR on %d pages using %d workers", num_pages, max_workers)
+        
+        def process_page(args):
+            page_num, pil_img = args
             preprocessed = preprocess_pil_image(pil_img)
             text = self._extract_from_image(preprocessed)
-            page_texts.append(text)
+            return page_num, text
 
-        combined = "\n\n".join(page_texts)
-        logger.info(
-            "PDF OCR complete — %d pages, %d total characters",
-            len(images),
-            len(combined),
-        )
-        return combined
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            results = list(executor.map(process_page, enumerate(images, start=1)))
+
+        results.sort(key=lambda x: x[0])
+        page_texts = [text for _, text in results]
+        
+        if return_list:
+            return page_texts
+            
+        return "\n\n".join(page_texts)
 
 
 # ---------------------------------------------------------------------------

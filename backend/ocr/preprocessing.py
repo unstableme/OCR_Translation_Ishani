@@ -65,10 +65,18 @@ def preprocess_pil_image(pil_image: Image.Image) -> np.ndarray:
 
 def _apply_pipeline(image: np.ndarray) -> np.ndarray:
     """
-    Core preprocessing: grayscale → blur → adaptive threshold.
+    Core preprocessing: resize → grayscale → blur → adaptive threshold.
     """
+    # 1. Resize if too large
+    image = resize_image(image, max_dim=2500)
+
+    # 2. Convert to grayscale
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+    # 3. No blur (1,1 is effectively none) prevents softening complex scripts
     blur = cv2.GaussianBlur(gray, (1, 1), 0)
+
+    # 4. Adaptive thresholding for contrast enhancement
     thresholded = cv2.adaptiveThreshold(
         blur,
         255,
@@ -78,3 +86,18 @@ def _apply_pipeline(image: np.ndarray) -> np.ndarray:
         2,
     )
     return thresholded
+
+
+def resize_image(image: np.ndarray, max_dim: int = 2500) -> np.ndarray:
+    """
+    Resize image if its longest side exceeds max_dim, maintaining aspect ratio.
+    """
+    h, w = image.shape[:2]
+    if max(h, w) <= max_dim:
+        return image
+
+    scale = max_dim / float(max(h, w))
+    new_w = int(w * scale)
+    new_h = int(h * scale)
+
+    return cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)

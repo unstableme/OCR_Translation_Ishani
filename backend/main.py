@@ -7,7 +7,7 @@ from db.connection import engine, SessionLocal
 from db.tables import Base, Document, OCRResult, Translation
 from ocr.preprocessing import preprocess_image
 from ocr.ocr_engine import OCREngine, OCRError, SUPPORTED_EXTENSIONS
-from ocr.translator import translate_tamang_to_nepali
+from ocr.translator import translate_to_nepali
 
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -85,20 +85,17 @@ async def upload_file(file: UploadFile = File(...)):
 
         # --- 2. OCR Processing ---
         t_ocr_start = time.time()
-        if ext == ".pdf":
-            # PDF: use OCREngine directly (handles conversion + OCR)
-            extracted_text = ocr_engine.process(file_path)
-        else:
-            # Image: preprocess first, then OCR
-            processed_file = preprocess_image(file_path)
-            extracted_text = ocr_engine._extract_from_image(processed_file)
+        # process now returns a list of strings (one per page)
+        extracted_pages = ocr_engine.process(file_path)
+        extracted_text = "\n\n".join(extracted_pages)
         
         t_ocr_end = time.time()
         ocr_duration = t_ocr_end - t_ocr_start
 
         # --- 3. LLM API Response ---
         t_llm_start = time.time()
-        translated_text, model_used = translate_tamang_to_nepali(extracted_text)
+        # Passing the list of pages triggers parallel translation in the translator module
+        translated_text, model_used = translate_to_nepali(extracted_pages)
         t_llm_end = time.time()
         llm_duration = t_llm_end - t_llm_start
 

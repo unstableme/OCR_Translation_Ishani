@@ -36,7 +36,7 @@ const LOADING_MESSAGES = [
     "Scanning document for text...",
     "Analyzing layout and structure...",
     "Running OCR extraction...",
-    "Translating Tamang to Nepali...",
+    "Translating to Nepali...",
     "Optimizing response for readability...",
     "Finalizing your results..."
 ];
@@ -66,7 +66,7 @@ const LoadingState = () => {
                 <div className="progress-bar-container">
                     <div className="progress-bar-fill"></div>
                 </div>
-                <p className="loading-hint">This usually takes about 30 seconds</p>
+                <p className="loading-hint">This usually takes about 15 seconds</p>
             </div>
         </div>
     );
@@ -102,23 +102,23 @@ const Dashboard = () => {
         }
     };
 
-    const handleUseSample = async () => {
+    const handleUseSample = async (sampleName = 'Tamang_Nep.pdf') => {
         setLoading(true);
         setError(null);
         try {
-            // Now fetching from the frontend's own public folder
-            const response = await fetch('/Tamang_Nep.pdf');
+            // Fetch the requested sample from the public folder
+            const response = await fetch(`/${sampleName}`);
             if (!response.ok) throw new Error('Failed to load sample document');
 
             const blob = await response.blob();
-            const sampleFile = new File([blob], 'Tamang_Nep.pdf', { type: 'application/pdf' });
+            const sampleFile = new File([blob], sampleName, { type: 'application/pdf' });
 
             setFile(sampleFile);
             setPreviewUrl(null);
             setResult(null);
         } catch (err) {
             console.error(err);
-            setError('Could not load sample document.');
+            setError(`Could not load ${sampleName} document.`);
         } finally {
             setLoading(false);
         }
@@ -256,8 +256,11 @@ const Dashboard = () => {
                                             <Upload size={48} className="upload-icon" />
                                             <p className="upload-text">Drag & drop or browse</p>
                                             <p className="upload-hint">Supports JPG, PNG, PDF</p>
-                                            <div className="sample-hint" onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleUseSample(); }}>
-                                                No file? <span className="sample-link">Use this sample document</span>
+                                            <div className="sample-hint">
+                                                No file? Try a sample:
+                                                <span className="sample-link" onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleUseSample('Tamang_Nep.pdf'); }}> Tamang</span>
+                                                {' or '}
+                                                <span className="sample-link" onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleUseSample('Newari_Nep.pdf'); }}>Newari</span>
                                             </div>
                                         </>
                                     )}
