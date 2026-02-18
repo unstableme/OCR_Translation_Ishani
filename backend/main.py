@@ -1,6 +1,10 @@
 import os
 import logging
 from pathlib import Path
+from dotenv import load_dotenv, find_dotenv
+
+# Load environment variables at the very beginning
+load_dotenv(find_dotenv())
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from db.connection import engine, SessionLocal
