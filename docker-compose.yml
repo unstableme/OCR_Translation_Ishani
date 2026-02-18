@@ -1,11 +1,37 @@
+# services:
+#   backend:
+#     image: unstableme02/ishani_dms-backend:latest
+#     build:
+#       context: ./backend
+#       dockerfile: Dockerfile
+#     volumes:
+#       - ./backend/uploads:/app/uploads
+#     ports:
+#       - "8000:8000"
+#     env_file:
+#       - .env
+#     environment:
+#       - DATABASE_URL=postgresql+psycopg2://postgres:root@db:5432/ocr_db
+#     restart: always
+
+#   frontend:
+#     image: unstableme02/ishani_dms-frontend:latest
+#     build:
+#       context: ./frontend
+#       dockerfile: Dockerfile
+#     ports:
+#       - "80:80"
+#     depends_on:
+#       - backend
+#     restart: always
+
+
+
 services:
   backend:
     image: unstableme02/ishani_dms-backend:latest
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
     volumes:
-      - ./backend/uploads:/app/uploads
+      - ./uploads:/app/uploads
     ports:
       - "8000:8000"
     env_file:
@@ -16,9 +42,6 @@ services:
 
   frontend:
     image: unstableme02/ishani_dms-frontend:latest
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
     ports:
       - "80:80"
     depends_on:

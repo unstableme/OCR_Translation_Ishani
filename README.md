@@ -30,10 +30,10 @@ The easiest way to run the entire stack is using Docker Compose.
    # Build locally and start
    docker-compose up --build -d
    ```
-   *Note: On a production server, you only need `docker-compose.yml` and `.env`. Running `docker-compose pull` will download the pre-built images from Docker Hub.*
+   *Note: On a production server, there is only need of `docker-compose.yml` and `.env`. Running `docker-compose pull` will download the pre-built images from Docker Hub.*
 
 3. **Access the App**:
-   - Frontend: `http://localhost:5173`
+   - Frontend: `http://localhost`
    - Backend API: `http://localhost:8000`
 
 ## Local Development (Manual)
