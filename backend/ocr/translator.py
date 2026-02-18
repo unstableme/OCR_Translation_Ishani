@@ -1,8 +1,8 @@
 import os
 import openai
-from dotenv import load_dotenv
+from dotenv import load_dotenv, find_dotenv
 
-load_dotenv()
+load_dotenv(find_dotenv())
 
 # Optimization: Limit Tesseract's internal multi-threading when we use parallel page processing.
 # This prevents CPU over-saturation and context switching overhead.
