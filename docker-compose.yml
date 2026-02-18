@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   backend:
-    image: unstableme02/Ishani_DMS-backend:latest
+    image: unstableme02/ishani_dms-backend:latest
     build:
       context: ./backend
       dockerfile: Dockerfile
@@ -15,7 +15,7 @@ services:
     restart: always
 
   frontend:
-    image: unstableme02/Ishani_DMS-frontend:latest
+    image: unstableme02/ishani_dms-frontend:latest
     build:
       context: ./frontend
       dockerfile: Dockerfile

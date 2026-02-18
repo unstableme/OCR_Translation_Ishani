@@ -28,4 +28,4 @@ jobs:
           context: ./backend
           file: ./backend/Dockerfile
           push: true
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/Ishani_DMS-backend:latest
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/ishani_dms-backend:latest
