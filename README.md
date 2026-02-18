@@ -5,79 +5,60 @@ A professional AI-powered tool for OCR extraction and translation. **NepText** s
 ## Project Structure
 
 - **`backend/`**: Python FastAPI server. Handles file uploads, OCR processing, and translation.
-    - Uses `Tesseract` for OCR and `OpenAI/OpenRouter` for translation.
 - **`frontend/`**: React application (Vite). Modern UI for document management and results.
+- **`.github/workflows/`**: CI/CD pipelines to build and push Docker images to Docker Hub.
+
+## Environment Setup
+
+The system requires environment variables to function (AI keys, database URLs, etc.).
+
+1. **Locate the Template**: See `.env.example` in the root directory.
+2. **Create your `.env`**: Copy `.env.example` to a new file named `.env` in the project root.
+   ```bash
+   cp .env.example .env
+   ```
+3. **Fill in the values**: Open `.env` and add your `OPENROUTER_KEY`. 
+
 
 ## Deployment with Docker (Recommended)
 
 The easiest way to run the entire stack is using Docker Compose.
 
-1. **Configure Environment**:
-   Ensure you have a `.env` file in the `backend/` directory with your API keys (e.g., `OPENROUTER_KEY`).
-
+1. **Configure Environment**: Ensure your root `.env` is ready as described above.
 2. **Run with Docker Compose**:
    ```bash
+   # Build locally and start
    docker-compose up --build -d
    ```
+   *Note: On a production server, you only need `docker-compose.yml` and `.env`. Running `docker-compose pull` will download the pre-built images from Docker Hub.*
 
 3. **Access the App**:
-   - Frontend: `http://localhost`
+   - Frontend: `http://localhost:5173`
    - Backend API: `http://localhost:8000`
 
 ## Local Development (Manual)
 
 ### 1. Backend Setup
-
 Navigate to the `backend` directory:
 ```bash
 cd backend
-```
-
-Create and activate a virtual environment:
-```bash
-# Windows
 python -m venv venv
-.\venv\Scripts\activate
-
-# Mac/Linux
-python3 -m venv venv
-source venv/bin/activate
-```
-
-Install dependencies:
-```bash
+# Activate venv (Windows: .\venv\Scripts\activate | Mac/Linux: source venv/bin/activate)
 pip install -r requirements.txt
-```
-
-Run the server:
-```bash
 uvicorn main:app --reload
 ```
-The backend will run at `http://localhost:8000`.
+*The backend uses `find_dotenv()` to automatically find the `.env` file in the root directory.*
 
 ### 2. Frontend Setup
-
-Open a new terminal and navigate to the `frontend` directory:
+Navigate to the `frontend` directory:
 ```bash
 cd frontend
-```
-
-Install dependencies:
-```bash
 npm install
-```
-
-Run the development server:
-```bash
 npm run dev
 ```
 The frontend will run at `http://localhost:5173`.
 
-## Usage
-
-1. Open `http://localhost:5173`.
-2. Login with any credentials (Mock Login).
-3. Drag & drop an image or PDF.
-4. Click **Translate Document**.
-5. View the original extracted text and the translated Nepali text.
-6. Download the result as a PDF.
+## CI/CD
+This project uses GitHub Actions to automatically build and push Docker images to Docker Hub on every push to the `main` branch.
+- Backend: `unstableme02/ishani_dms-backend`
+- Frontend: `unstableme02/ishani_dms-frontend`
