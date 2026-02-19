@@ -1,5 +1,5 @@
 import React, { useState, useRef } from 'react';
-import { Upload, FileText, Check, AlertCircle, RefreshCw, ArrowRight, Download } from 'lucide-react';
+import { Upload, FileText, Check, AlertCircle, RefreshCw, ArrowRight, Download, Info } from 'lucide-react';
 import axios from 'axios';
 import { notoDevanagari } from '../fonts/NotoSansDevanagari';
 import { jsPDF } from 'jspdf';
@@ -227,6 +227,15 @@ const Dashboard = () => {
             </header>
 
             <main className="main-content container">
+                <section className="hero-section animate-fade-in">
+                    <h2 className="hero-title">Intelligent Devanagari OCR & Translation</h2>
+                    <p className="hero-description">
+                        This system allows you to upload photos and multi-page PDFs containing Devanagari text.
+                        Our AI expertly extracts the content and translates it clearly into native Nepali,
+                        streamlining your document processing workflow.
+                    </p>
+                </section>
+
                 <div className="split-view">
                     {/* Left Panel: Upload & Preview */}
                     <div className="panel left-panel glass-panel animate-fade-in">
@@ -295,6 +304,21 @@ const Dashboard = () => {
                                     <span>{error}</span>
                                 </div>
                             )}
+
+                            <div className="info-note">
+                                <div className="info-note-icon">
+                                    <Info size={20} />
+                                </div>
+                                <div className="info-note-content">
+                                    <h4>Model Performance Note</h4>
+                                    <p>
+                                        As this is a demo environment, we are currently utilizing cost-efficient AI models.
+                                        While highly effective, occasional nuances may occur. For enterprise-grade production,
+                                        we support integration with premium, high-performance LLMs to ensure the highest
+                                        level of accuracy and reliability.
+                                    </p>
+                                </div>
+                            </div>
                         </div>
                     </div>
 

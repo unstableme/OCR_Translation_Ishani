@@ -4,10 +4,19 @@ from pathlib import Path
 from dotenv import load_dotenv, find_dotenv
 
 # Load environment variables at the very beginning
-load_dotenv(find_dotenv())
+load_dotenv(find_dotenv(), override=False)
+
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from db.connection import engine, SessionLocal
+
+# Quick diagnostic for database connection
+db_url = os.getenv("DATABASE_URL", "")
+logger = logging.getLogger(__name__)
+# Mask the password in logs
+safe_url = db_url.split('@')[-1] if '@' in db_url else db_url
+print(f"DEBUG: Database connecting to -> {safe_url}")
+
 from db.tables import Base, Document, OCRResult, Translation
 from ocr.preprocessing import preprocess_image
 from ocr.ocr_engine import OCREngine, OCRError, SUPPORTED_EXTENSIONS
