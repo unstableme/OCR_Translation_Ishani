@@ -8,7 +8,15 @@ load_dotenv(find_dotenv(), override=False)
 
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
+from pydantic import BaseModel
 from db.connection import engine, SessionLocal
+
+from typing import Union, List
+
+class TranslationRequest(BaseModel):
+    text: Union[str, List[str]]
+    source_lang: str = "Tamang" # Backend supports "Tamang", "Newari", or combinations like "Tamang/Newari"
+    target_lang: str = "Nepali"
 
 # Quick diagnostic for database connection
 db_url = os.getenv("DATABASE_URL", "")
@@ -20,7 +28,7 @@ print(f"DEBUG: Database connecting to -> {safe_url}")
 from db.tables import Base, Document, OCRResult, Translation
 from ocr.preprocessing import preprocess_image
 from ocr.ocr_engine import OCREngine, OCRError, SUPPORTED_EXTENSIONS
-from ocr.translator import translate_to_nepali
+from ocr.translator import translate_text
 
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -53,8 +61,38 @@ async def root():
     return {"status": "running", "message": "OCR & Translation API is live"}
 
 
+@app.post("/translate")
+async def translate_only(request: TranslationRequest):
+    """
+    Directly translate text strings without OCR or file upload.
+    Used for UI-based table row translations.
+    """
+    if not request.text.strip():
+        raise HTTPException(status_code=400, detail="Text for translation cannot be empty")
+
+    try:
+        translated_text, model_used = translate_text(
+            request.text, 
+            request.source_lang, 
+            request.target_lang
+        )
+        return {
+            "translated_text": translated_text,
+            "source_lang": request.source_lang,
+            "target_lang": request.target_lang,
+            "model_used": model_used
+        }
+    except Exception as e:
+        logger.error(f"Direct translation failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/upload")
-async def upload_file(file: UploadFile = File(...)):
+async def upload_file(
+    file: UploadFile = File(...),
+    source_lang: str = "Tamang",
+    target_lang: str = "Nepali"
+):
     """
     Upload a document (image or PDF) for OCR and translation.
     """
@@ -108,7 +146,7 @@ async def upload_file(file: UploadFile = File(...)):
         # --- 3. LLM API Response ---
         t_llm_start = time.time()
         # Passing the list of pages triggers parallel translation in the translator module
-        translated_text, model_used = translate_to_nepali(extracted_pages)
+        translated_text, model_used = translate_text(extracted_pages, source_lang, target_lang)
         t_llm_end = time.time()
         llm_duration = t_llm_end - t_llm_start
 

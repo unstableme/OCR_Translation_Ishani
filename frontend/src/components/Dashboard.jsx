@@ -36,10 +36,12 @@ const LOADING_MESSAGES = [
     "Scanning document for text...",
     "Analyzing layout and structure...",
     "Running OCR extraction...",
-    "Translating to Nepali...",
+    "Translating your document...",
     "Optimizing response for readability...",
     "Finalizing your results..."
 ];
+
+
 
 const LoadingState = () => {
     const [msgIndex, setMsgIndex] = React.useState(0);
@@ -79,6 +81,8 @@ const Dashboard = () => {
     const [result, setResult] = useState(null);
     const [error, setError] = useState(null);
     const [activeTab, setActiveTab] = useState('translated'); // 'extracted' | 'translated'
+    const [sourceLang, setSourceLang] = useState('Tamang/Newari');
+    const [targetLang, setTargetLang] = useState('Nepali');
 
     const resultsRef = useRef(null);
 
@@ -143,6 +147,8 @@ const Dashboard = () => {
 
         const formData = new FormData();
         formData.append('file', file);
+        formData.append('source_lang', sourceLang);
+        formData.append('target_lang', targetLang);
 
         try {
             const response = await axios.post(`${API_BASE_URL}/upload`, formData, {
@@ -231,7 +237,7 @@ const Dashboard = () => {
                     <h2 className="hero-title">Intelligent Devanagari OCR & Translation</h2>
                     <p className="hero-description">
                         This system allows you to upload photos and multi-page PDFs containing Devanagari text.
-                        Our AI expertly extracts the content and translates it clearly into native Nepali,
+                        Our AI expertly extracts the content and translates it across Himalayan languages,
                         streamlining your document processing workflow.
                     </p>
                 </section>
@@ -281,6 +287,8 @@ const Dashboard = () => {
                                     <img src={previewUrl} alt="Preview" />
                                 </div>
                             )}
+
+
 
                             <button
                                 className="btn btn-primary w-full mt-4"
@@ -349,7 +357,7 @@ const Dashboard = () => {
                                             className={`tab ${activeTab === 'translated' ? 'active' : ''}`}
                                             onClick={() => setActiveTab('translated')}
                                         >
-                                            <Check size={16} /> Nepali Translation
+                                            <Check size={16} /> Translated Content
                                         </button>
                                         <button
                                             className={`tab ${activeTab === 'extracted' ? 'active' : ''}`}

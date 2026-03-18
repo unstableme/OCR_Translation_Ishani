@@ -13,14 +13,16 @@ from typing import Optional
 import cv2
 import numpy as np
 import pytesseract as pt
-from PIL import Image
+import fitz  # PyMuPDF
+from docx import Document
 from ocr.preprocessing import preprocess_pil_image
 
 logger = logging.getLogger(__name__)
 
 SUPPORTED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif"}
 SUPPORTED_PDF_EXTENSIONS = {".pdf"}
-SUPPORTED_EXTENSIONS = SUPPORTED_IMAGE_EXTENSIONS | SUPPORTED_PDF_EXTENSIONS
+SUPPORTED_WORD_EXTENSIONS = {".docx", ".doc"}
+SUPPORTED_EXTENSIONS = SUPPORTED_IMAGE_EXTENSIONS | SUPPORTED_PDF_EXTENSIONS | SUPPORTED_WORD_EXTENSIONS
 
 class OCRError(Exception):
     """Raised when an OCR operation fails."""
@@ -88,11 +90,48 @@ class OCREngine:
 
         if ext in SUPPORTED_PDF_EXTENSIONS:
             logger.info("Processing PDF: %s", file_path)
-            return self._process_pdf(str(path), return_list=True)
+            # Try direct extraction first (Hybrid approach)
+            direct_text = self._process_pdf_direct(str(path))
+            if direct_text and any(page.strip() for page in direct_text):
+                logger.info("Direct extraction successful for PDF")
+                return direct_text
+            
+            logger.info("Direct extraction failed or empty, falling back to OCR for PDF")
+            return self._process_pdf_ocr(str(path), return_list=True)
+        elif ext in SUPPORTED_WORD_EXTENSIONS:
+            logger.info("Processing Word document: %s", file_path)
+            return self._process_word(str(path))
         else:
             logger.info("Processing image: %s", file_path)
             extracted = self._extract_from_image(str(path))
             return [extracted]  # Return as list for consistency with parallel processing
+
+    # ------------------------------------------------------------------
+    # Word Extraction
+    # ------------------------------------------------------------------
+    def _process_word(self, file_path: str) -> list[str]:
+        """
+        Extract text from a .doc or .docx file.
+        Returns a list of strings (one element for now).
+        """
+        path = Path(file_path)
+        ext = path.suffix.lower()
+        
+        try:
+            if ext == ".docx":
+                doc = Document(file_path)
+                text = "\n".join([para.text for para in doc.paragraphs])
+                return [text.strip()]
+            elif ext == ".doc":
+                # Fallback to docx2txt for .doc if possible, though it's still limited
+                import docx2txt
+                text = docx2txt.process(file_path)
+                return [text.strip()]
+            else:
+                raise OCRError(f"Unsupported word extension: {ext}")
+        except Exception as e:
+            logger.error(f"Word extraction failed: {e}")
+            raise OCRError(f"Failed to extract text from Word document: {e}")
 
     # ------------------------------------------------------------------
     # Image OCR
@@ -178,7 +217,23 @@ class OCREngine:
                 f"Failed to convert PDF to images: {exc}"
             ) from exc
 
-    def _process_pdf(self, pdf_path: str, return_list: bool = False) -> str | list[str]:
+    def _process_pdf_direct(self, pdf_path: str) -> list[str]:
+        """
+        Attempt to extract text directly from a PDF using PyMuPDF.
+        Returns a list of strings (one per page).
+        """
+        try:
+            doc = fitz.open(pdf_path)
+            page_texts = []
+            for page in doc:
+                text = page.get_text("text")
+                page_texts.append(text.strip())
+            return page_texts
+        except Exception as e:
+            logger.warning(f"Direct PDF extraction failed: {e}")
+            return []
+
+    def _process_pdf_ocr(self, pdf_path: str, return_list: bool = False) -> str | list[str]:
         """
         Convert a PDF to images, run OCR on each page in parallel, and return
         the results.

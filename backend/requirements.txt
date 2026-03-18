@@ -11,3 +11,6 @@ pdf2image
 Pillow
 psycopg2-binary
 alembic
+pymupdf
+python-docx
+docx2txt
