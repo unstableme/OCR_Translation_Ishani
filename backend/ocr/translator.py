@@ -110,3 +110,48 @@ def translate_pages_parallel(pages: list[str], source_lang: str, target_lang: st
         
     combined_text = "\n\n".join(translated_texts)
     return combined_text, MODEL
+
+
+def detect_language(text: str) -> dict:
+    """
+    Detects the language of a given text snippet using LLM.
+    Focuses on Himalayan languages (Tamang, Newari, Nepali).
+    """
+    # Truncate to first 500 characters for efficiency to save tokens
+    snippet = text[:500].strip()
+    if not snippet:
+        return {"language": "Unknown", "code": "unknown", "confidence": 0.0}
+
+    system_prompt = """
+You are a language identification expert specialized in Himalayan languages.
+Identify if the provided text (likely in Devanagari script) is Tamang, Newari, or Nepali.
+
+Rules:
+1. Output ONLY a valid JSON object in this format: {"language": "Language Name", "code": "lang_code", "confidence": 0.95}
+2. Language codes: Tamang -> 'tg', Newari -> 'new', Nepali -> 'ne', English -> 'en', Other -> 'ot'.
+3. Use a confidence score between 0 and 1.
+4. Output ONLY the JSON. No preamble, no markdown blocks, no talk.
+"""
+
+    messages = [
+        {"role": "system", "content": system_prompt.strip()},
+        {"role": "user", "content": snippet}
+    ]
+
+    try:
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=messages,
+            temperature=0.1
+        )
+        content = response.choices[0].message.content.strip()
+        
+        # Strip markdown code blocks if the model included them
+        if content.startswith("```"):
+            content = content.replace("```json", "").replace("```", "").strip()
+            
+        import json
+        return json.loads(content)
+    except Exception as e:
+        print(f"Language detection failed: {e}")
+        return {"language": "Detection Error", "code": "error", "confidence": 0.0}
