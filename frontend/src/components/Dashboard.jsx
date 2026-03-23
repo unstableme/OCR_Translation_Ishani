@@ -1,5 +1,5 @@
 import React, { useState, useRef } from 'react';
-import { Upload, FileText, Check, AlertCircle, RefreshCw, ArrowRight, Download, Info } from 'lucide-react';
+import { Upload, FileText, Check, AlertCircle, RefreshCw, ArrowRight, Download, Info, Type } from 'lucide-react';
 import axios from 'axios';
 import { notoDevanagari } from '../fonts/NotoSansDevanagari';
 import { jsPDF } from 'jspdf';
@@ -83,6 +83,8 @@ const Dashboard = () => {
     const [activeTab, setActiveTab] = useState('translated'); // 'extracted' | 'translated'
     const [sourceLang, setSourceLang] = useState('Tamang/Newari');
     const [targetLang, setTargetLang] = useState('Nepali');
+    const [inputMode, setInputMode] = useState('file'); // 'file' | 'text'
+    const [inputText, setInputText] = useState('');
 
     const resultsRef = useRef(null);
 
@@ -128,9 +130,14 @@ const Dashboard = () => {
         }
     };
 
-    const handleUpload = async () => {
-        if (!file) {
+    const handleTranslate = async () => {
+        if (inputMode === 'file' && !file) {
             setError('Please upload a document or use the sample document first.');
+            return;
+        }
+
+        if (inputMode === 'text' && !inputText.trim()) {
+            setError('Please enter or paste some text to translate.');
             return;
         }
 
@@ -145,17 +152,29 @@ const Dashboard = () => {
             }, 100);
         }
 
-        const formData = new FormData();
-        formData.append('file', file);
-        formData.append('source_lang', sourceLang);
-        formData.append('target_lang', targetLang);
-
         try {
-            const response = await axios.post(`${API_BASE_URL}/upload`, formData, {
-                headers: {
-                    'Content-Type': 'multipart/form-data',
-                },
-            });
+            let response;
+            if (inputMode === 'file') {
+                const formData = new FormData();
+                formData.append('file', file);
+                formData.append('source_lang', sourceLang);
+                formData.append('target_lang', targetLang);
+
+                response = await axios.post(`${API_BASE_URL}/upload`, formData, {
+                    headers: {
+                        'Content-Type': 'multipart/form-data',
+                    },
+                });
+            } else {
+                response = await axios.post(`${API_BASE_URL}/translate`, {
+                    text: inputText,
+                    source_lang: sourceLang,
+                    target_lang: targetLang,
+                });
+                // Standardize response for the UI
+                response.data.extracted_text = inputText;
+            }
+
             setResult(response.data);
             setActiveTab('translated');
         } catch (err) {
@@ -246,41 +265,74 @@ const Dashboard = () => {
                     {/* Left Panel: Upload & Preview */}
                     <div className="panel left-panel glass-panel animate-fade-in">
                         <div className="panel-header">
-                            <h2><Upload size={20} /> Document Upload</h2>
+                            <h2><RefreshCw size={20} /> Input Source</h2>
                         </div>
 
                         <div className="upload-area">
-                            <label htmlFor="file-upload" className={`drop-zone ${file ? 'has-file' : ''}`}>
-                                <input
-                                    id="file-upload"
-                                    type="file"
-                                    onChange={handleFileChange}
-                                    accept=".jpg,.jpeg,.png,.pdf"
-                                    className="hidden-input"
-                                />
-                                <div className="drop-content">
-                                    {file ? (
-                                        <div className="file-info">
-                                            <FileText size={48} className="text-primary" />
-                                            <p className="filename">{file.name}</p>
-                                            <p className="filesize">{(file.size / 1024).toFixed(2)} KB</p>
-                                            <span className="btn-change">Change File</span>
-                                        </div>
-                                    ) : (
-                                        <>
-                                            <Upload size={48} className="upload-icon" />
-                                            <p className="upload-text">Drag & drop or browse</p>
-                                            <p className="upload-hint">Supports JPG, PNG, PDF</p>
-                                            <div className="sample-hint">
-                                                No file? Try a sample:
-                                                <span className="sample-link" onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleUseSample('Tamang_Nep.pdf'); }}> Tamang</span>
-                                                {' or '}
-                                                <span className="sample-link" onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleUseSample('Newari_Nep.pdf'); }}>Newari</span>
+                            <div className="mode-toggle">
+                                <button
+                                    className={`mode-btn ${inputMode === 'file' ? 'active' : ''}`}
+                                    onClick={() => setInputMode('file')}
+                                >
+                                    <Upload size={16} /> File Upload
+                                </button>
+                                <button
+                                    className={`mode-btn ${inputMode === 'text' ? 'active' : ''}`}
+                                    onClick={() => setInputMode('text')}
+                                >
+                                    <Type size={16} /> Text Input
+                                </button>
+                            </div>
+
+                            {inputMode === 'file' ? (
+                                <label htmlFor="file-upload" className={`drop-zone ${file ? 'has-file' : ''}`}>
+                                    <input
+                                        id="file-upload"
+                                        type="file"
+                                        onChange={handleFileChange}
+                                        accept=".jpg,.jpeg,.png,.pdf"
+                                        className="hidden-input"
+                                    />
+                                    <div className="drop-content">
+                                        {file ? (
+                                            <div className="file-info">
+                                                <FileText size={48} className="text-primary" />
+                                                <p className="filename">{file.name}</p>
+                                                <p className="filesize">{(file.size / 1024).toFixed(2)} KB</p>
+                                                <span className="btn-change">Change File</span>
                                             </div>
-                                        </>
-                                    )}
+                                        ) : (
+                                            <>
+                                                <Upload size={48} className="upload-icon" />
+                                                <p className="upload-text">Drag & drop or browse</p>
+                                                <p className="upload-hint">Supports JPG, PNG, PDF</p>
+                                                <div className="sample-hint">
+                                                    No file? Try a sample:
+                                                    <span className="sample-link" onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleUseSample('Tamang_Nep.pdf'); }}> Tamang</span>
+                                                    {' or '}
+                                                    <span className="sample-link" onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleUseSample('Newari_Nep.pdf'); }}>Newari</span>
+                                                </div>
+                                            </>
+                                        )}
+                                    </div>
+                                </label>
+                            ) : (
+                                <div className="text-input-container">
+                                    <textarea
+                                        className="text-input-field"
+                                        placeholder="Paste your Tamang or Newari text here..."
+                                        value={inputText}
+                                        onChange={(e) => setInputText(e.target.value)}
+                                    ></textarea>
+                                    <div className="input-footer">
+                                        <span>Character count: {inputText.length}</span>
+                                        <span className="sample-hint" style={{ border: 'none', width: 'auto', padding: 0 }}>
+                                            Need a sample? 
+                                            <span className="sample-link" onClick={() => setInputText('छ्याल्हाबा, खन्ता बा तबा मुला?')}> Tamang</span>
+                                        </span>
+                                    </div>
                                 </div>
-                            </label>
+                            )}
 
                             {previewUrl && (
                                 <div className="image-preview">
@@ -292,7 +344,7 @@ const Dashboard = () => {
 
                             <button
                                 className="btn btn-primary w-full mt-4"
-                                onClick={handleUpload}
+                                onClick={handleTranslate}
                                 disabled={loading}
                             >
                                 {loading ? (
@@ -301,7 +353,7 @@ const Dashboard = () => {
                                     </>
                                 ) : (
                                     <>
-                                        Translate Document <ArrowRight size={18} />
+                                        {inputMode === 'file' ? 'Translate Document' : 'Translate Text'} <ArrowRight size={18} />
                                     </>
                                 )}
                             </button>
@@ -375,12 +427,27 @@ const Dashboard = () => {
                                         <p className="status-badge success">
                                             <Check size={14} /> Processing Complete
                                         </p>
+
+                                        {result.timing && (
+                                            <div className="timing-info animate-fade-in">
+                                                <RefreshCw size={12} className="timing-icon" />
+                                                {result.timing.ocr_processing_seconds > 0 && (
+                                                    <span className="timing-item">OCR: <strong>{result.timing.ocr_processing_seconds}s</strong></span>
+                                                )}
+                                                <span className="timing-item">AI: <strong>{result.timing.llm_api_response_seconds}s</strong></span>
+                                                <span className="timing-item total">Total: <strong>{result.timing.total_processing_seconds}s</strong></span>
+                                            </div>
+                                        )}
                                     </div>
                                 </div>
                             ) : (
                                 <div className="empty-state">
                                     <TamangTranslationIcon size={64} className="empty-icon" />
-                                    <p>Upload a document to see the translation results here.</p>
+                                    <p>
+                                        {inputMode === 'file' 
+                                            ? 'Upload a document to see the translation results here.' 
+                                            : 'Enter text and click translate to see the results here.'}
+                                    </p>
                                 </div>
                             )}
                         </div>

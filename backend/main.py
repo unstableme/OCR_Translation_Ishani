@@ -28,7 +28,7 @@ print(f"DEBUG: Database connecting to -> {safe_url}")
 from db.tables import Base, Document, OCRResult, Translation
 from ocr.preprocessing import preprocess_image
 from ocr.ocr_engine import OCREngine, OCRError, SUPPORTED_EXTENSIONS
-from ocr.translator import translate_text
+from ocr.translator import translate_text, detect_language
 
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -65,10 +65,19 @@ async def root():
 async def translate_only(request: TranslationRequest):
     """
     Directly translate text strings without OCR or file upload.
-    Used for UI-based table row translations.
+    Used for UI-based direct text input or table row translations.
     """
-    if not request.text.strip():
-        raise HTTPException(status_code=400, detail="Text for translation cannot be empty")
+    import time
+    t0 = time.time()
+
+    if isinstance(request.text, str):
+        if not request.text.strip():
+            raise HTTPException(status_code=400, detail="Text for translation cannot be empty")
+    elif isinstance(request.text, list):
+        if not any(t.strip() for t in request.text if isinstance(t, str)):
+            raise HTTPException(status_code=400, detail="Text list for translation cannot be empty")
+    else:
+         raise HTTPException(status_code=400, detail="Invalid text format. Expected string or list of strings.")
 
     try:
         translated_text, model_used = translate_text(
@@ -76,14 +85,82 @@ async def translate_only(request: TranslationRequest):
             request.source_lang, 
             request.target_lang
         )
+        total_duration = time.time() - t0
         return {
             "translated_text": translated_text,
             "source_lang": request.source_lang,
             "target_lang": request.target_lang,
-            "model_used": model_used
+            "model_used": model_used,
+            "timing": {
+                "llm_api_response_seconds": round(total_duration, 2),
+                "total_processing_seconds": round(total_duration, 2)
+            }
         }
     except Exception as e:
         logger.error(f"Direct translation failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/detect_language")
+async def language_detection_endpoint(file: UploadFile = File(...)):
+    """
+    Detect the language of an uploaded document (image or PDF).
+    Uses professional OCR and LLM-based identification for Himalayan languages.
+    """
+    filename = file.filename or "unknown"
+    ext = Path(filename).suffix.lower()
+
+    if ext not in SUPPORTED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unsupported file type '{ext}'. "
+                f"Accepted: {sorted(SUPPORTED_EXTENSIONS)}"
+            ),
+        )
+
+    import time
+    t0 = time.time()
+    
+    try:
+        # 1. Save File (Temporary)
+        os.makedirs("uploads", exist_ok=True)
+        temp_filename = f"detect_{int(t0)}_{filename}"
+        file_path = f"uploads/{temp_filename}"
+
+        with open(file_path, "wb") as f:
+            f.write(await file.read())
+        
+        # 2. OCR Extraction (Focusing on first page for speed/efficiency)
+        extracted_pages = ocr_engine.process(file_path)
+        if not extracted_pages:
+            return {
+                "message": "No text extracted from document",
+                "language": "Unknown",
+                "language_code": "unknown",
+                "confidence": 0.0
+            }
+            
+        first_page_text = extracted_pages[0]
+        
+        # 3. Language Identification (LLM based snippet analysis)
+        detection_result = detect_language(first_page_text)
+        
+        duration = time.time() - t0
+        
+        return {
+            "message": "Language identified successfully",
+            "filename": filename,
+            "language": detection_result.get("language", "Unknown"),
+            "language_code": detection_result.get("code", "unknown"),
+            "confidence": detection_result.get("confidence", 0.0),
+            "snippet": first_page_text[:120].strip() + "...",
+            "timing": {
+                "total_processing_seconds": round(duration, 2)
+            }
+        }
+    except Exception as e:
+        logger.error(f"Language detection failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
