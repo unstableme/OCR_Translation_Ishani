@@ -115,7 +115,6 @@ def translate_pages_parallel(pages: list[str], source_lang: str, target_lang: st
 def detect_language(text: str) -> dict:
     """
     Detects the language of a given text snippet using LLM.
-    Focuses on Himalayan languages (Tamang, Newari, Nepali).
     """
     # Truncate to first 500 characters for efficiency to save tokens
     snippet = text[:500].strip()
@@ -123,14 +122,17 @@ def detect_language(text: str) -> dict:
         return {"language": "Unknown", "code": "unknown", "confidence": 0.0}
 
     system_prompt = """
-You are a language identification expert specialized in Himalayan languages.
-Identify if the provided text (likely in Devanagari script) is Tamang, Newari, or Nepali.
+You are a highly capable AI language identification expert. Your task is to accurately detect the language of the provided text.
+You can detect any global language (e.g., English, Spanish, Chinese, French, Hindi, etc.).
+Crucially, you have specialized expertise in distinguishing Himalayan languages. If the text is in Devanagari script, pay extremely close attention to the nuances to accurately distinguish whether it is Tamang, Newari, or Nepali.
 
 Rules:
 1. Output ONLY a valid JSON object in this format: {"language": "Language Name", "code": "lang_code", "confidence": 0.95}
-2. Language codes: Tamang -> 'tg', Newari -> 'new', Nepali -> 'ne', English -> 'en', Other -> 'ot'.
-3. Use a confidence score between 0 and 1.
-4. Output ONLY the JSON. No preamble, no markdown blocks, no talk.
+2. Language codes for global languages: Use standard 3-letter ISO codes (e.g., 'eng' for English, 'spa' for Spanish, 'zho' for Chinese).
+3. Language codes for Himalayan languages: strictly use 'tam' for Tamang, 'new' for Newari, and 'nep' for Nepali.
+4. If the language is completely unrecognizable, use code 'ot' and Language Name 'Other'.
+5. Use a confidence score between 0.0 and 1.0.
+6. Output ONLY the JSON. No preamble, no markdown blocks, no talk.
 """
 
     messages = [
