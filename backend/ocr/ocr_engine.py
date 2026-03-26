@@ -1,21 +1,27 @@
 """
 OCR Engine Module
 =================
-Provides robust OCR text extraction from images and PDF documents
-using Tesseract OCR. Supports Nepali, Hindi and English languages by default.
+Provides robust OCR text extraction from images and PDF documents using Tesseract.
+
+Strategy:
+  - Born-digital PDFs  → PyMuPDF direct extraction (fastest, lossless)
+  - Scanned/image PDFs → Tesseract (Optimized for Nepali/Devanagari)
+  - Standalone images  → Tesseract (Optimized for Nepali/Devanagari)
+  - Word documents     → python-docx / docx2txt
 """
 
 import os
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union, List
 
-import cv2
+import cv2  # type: ignore
 import numpy as np
-import pytesseract as pt
-import fitz  # PyMuPDF
-from docx import Document
-from ocr.preprocessing import preprocess_pil_image
+import pytesseract as pt # type: ignore
+import fitz  # type: ignore # PyMuPDF
+from PIL import Image
+from docx import Document # type: ignore
+from ocr.preprocessing import preprocess_pil_image, resize_image # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -24,28 +30,28 @@ SUPPORTED_PDF_EXTENSIONS = {".pdf"}
 SUPPORTED_WORD_EXTENSIONS = {".docx", ".doc"}
 SUPPORTED_EXTENSIONS = SUPPORTED_IMAGE_EXTENSIONS | SUPPORTED_PDF_EXTENSIONS | SUPPORTED_WORD_EXTENSIONS
 
+
 class OCRError(Exception):
     """Raised when an OCR operation fails."""
 
 
 class OCREngine:
     """
-    A configurable OCR engine that extracts text from images and PDFs.
+    A high-precision Tesseract-based engine for Nepali text extraction.
 
     Parameters
     ----------
     lang : str
-        Tesseract language string (e.g. ``"nep+hin+eng"``).
+        Tesseract language string (e.g. "nep+eng" for Devanagari).
     tesseract_config : str
-        Extra Tesseract CLI flags (e.g. ``"--psm 6"``).
+        Tesseract configuration flags (default: "--psm 3").
     poppler_path : str | None
-        Path to Poppler binaries on Windows. If *None*, Poppler must be on
-        the system PATH.
+        Optional path to Poppler binaries (Windows focus).
     """
 
     def __init__(
         self,
-        lang: str = "nep+eng",  # Nepali covers Devanagari script for Tamang/Newari; eng for English.
+        lang: str = "nep+eng",
         tesseract_config: str = "--psm 3",
         poppler_path: Optional[str] = None,
     ):
@@ -56,224 +62,142 @@ class OCREngine:
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-    def process(self, file_path: str) -> str:
-        """
-        Extract text from an image or PDF file.
-
-        Parameters
-        ----------
-        file_path : str
-            Path to an image or PDF file.
-
-        Returns
-        -------
-        str
-            Extracted text.
-
-        Raises
-        ------
-        OCRError
-            If the file does not exist, has an unsupported extension, or
-            an error occurs during OCR / PDF conversion.
-        """
+    def process(self, file_path: str) -> List[str]:
+        """Extract text from supported files, returning one string per page."""
         path = Path(file_path)
-
         if not path.exists():
             raise OCRError(f"File not found: {file_path}")
 
         ext = path.suffix.lower()
         if ext not in SUPPORTED_EXTENSIONS:
-            raise OCRError(
-                f"Unsupported file type '{ext}'. "
-                f"Supported: {sorted(SUPPORTED_EXTENSIONS)}"
-            )
+            raise OCRError(f"Unsupported file type '{ext}'.")
 
         if ext in SUPPORTED_PDF_EXTENSIONS:
-            logger.info("Processing PDF: %s", file_path)
-            # Try direct extraction first (Hybrid approach)
+            # 1. Try direct extraction (born-digital)
             direct_text = self._process_pdf_direct(str(path))
             if direct_text and any(page.strip() for page in direct_text):
-                logger.info("Direct extraction successful for PDF")
                 return direct_text
-            
-            logger.info("Direct extraction failed or empty, falling back to OCR for PDF")
+
+            # 2. Scanned OCR fallback
             return self._process_pdf_ocr(str(path), return_list=True)
+
         elif ext in SUPPORTED_WORD_EXTENSIONS:
-            logger.info("Processing Word document: %s", file_path)
             return self._process_word(str(path))
+
         else:
-            logger.info("Processing image: %s", file_path)
-            extracted = self._extract_from_image(str(path))
-            return [extracted]  # Return as list for consistency with parallel processing
+            return [self._extract_from_image(str(path))]
 
     # ------------------------------------------------------------------
-    # Word Extraction
+    # File Specific Extractors
     # ------------------------------------------------------------------
-    def _process_word(self, file_path: str) -> list[str]:
-        """
-        Extract text from a .doc or .docx file.
-        Returns a list of strings (one element for now).
-        """
-        path = Path(file_path)
-        ext = path.suffix.lower()
-        
+    def _process_word(self, file_path: str) -> List[str]:
         try:
-            if ext == ".docx":
+            path = Path(file_path)
+            if path.suffix.lower() == ".docx":
                 doc = Document(file_path)
-                text = "\n".join([para.text for para in doc.paragraphs])
-                return [text.strip()]
-            elif ext == ".doc":
-                # Fallback to docx2txt for .doc if possible, though it's still limited
-                import docx2txt
-                text = docx2txt.process(file_path)
-                return [text.strip()]
+                return ["\n".join([p.text for p in doc.paragraphs]).strip()]
             else:
-                raise OCRError(f"Unsupported word extension: {ext}")
+                import docx2txt # type: ignore
+                return [docx2txt.process(file_path).strip()]
         except Exception as e:
-            logger.error(f"Word extraction failed: {e}")
-            raise OCRError(f"Failed to extract text from Word document: {e}")
+            raise OCRError(f"Word extraction failed: {e}")
 
-    # ------------------------------------------------------------------
-    # Image OCR
-    # ------------------------------------------------------------------
-    def _extract_from_image(self, image_input) -> str:
+    def _extract_from_image(self, image_input: Union[str, np.ndarray, Image.Image]) -> str:
         """
-        Run Tesseract on a single image.
-
-        Parameters
-        ----------
-        image_input : str | numpy.ndarray | PIL.Image.Image
-            File path, OpenCV array, or PIL Image.
-
-        Returns
-        -------
-        str
-            Extracted text, stripped of leading/trailing whitespace.
+        Clean, normalise, and OCR a single image using Tesseract.
         """
         try:
             if isinstance(image_input, str):
-                # file path — read with OpenCV
                 img = cv2.imread(image_input)
-                if img is None:
-                    raise OCRError(
-                        f"Failed to read image file: {image_input}"
-                    )
             elif isinstance(image_input, np.ndarray):
                 img = image_input
             elif isinstance(image_input, Image.Image):
-                img = np.array(image_input)
+                img = cv2.cvtColor(np.array(image_input), cv2.COLOR_RGB2BGR)
             else:
-                raise OCRError(
-                    f"Unsupported image input type: {type(image_input).__name__}"
-                )
+                raise OCRError("Unsupported image input type.")
+            
+            if img is None:
+                raise OCRError("Could not load image.")
 
-            text: str = pt.image_to_string(
-                img,
-                lang=self.lang,
-                config=self.tesseract_config,
-            )
-            logger.debug("Extracted %d characters", len(text.strip()))
-            return text.strip()
+            # Ensure optimal size for Tesseract (max 4000px)
+            img = resize_image(img, max_dim=4000)
 
-        except pt.TesseractError as exc:
-            raise OCRError(f"Tesseract OCR failed: {exc}") from exc
-
-    # ------------------------------------------------------------------
-    # PDF → images → OCR
-    # ------------------------------------------------------------------
-    def _convert_pdf_to_images(self, pdf_path: str) -> list:
-        """
-        Convert every page of a PDF to a PIL Image.
-
-        Returns
-        -------
-        list[PIL.Image.Image]
-        """
-        try:
-            from pdf2image import convert_from_path
-        except ImportError as exc:
-            raise OCRError(
-                "pdf2image is required for PDF processing. "
-                "Install it with: pip install pdf2image"
-            ) from exc
-
-        try:
-            kwargs = {
-                "pdf_path": pdf_path,
-                "dpi": 150,          # 150 DPI is faster and often sufficient for clear OCR
-                "thread_count": 4,   # Use multiple CPU cores for conversion
-            }
-            if self.poppler_path:
-                kwargs["poppler_path"] = self.poppler_path
-
-            images = convert_from_path(**kwargs)
-            logger.info(
-                "Converted PDF to %d page image(s) at 150 DPI", len(images)
-            )
-            return images
-
+            return self._tesseract_ocr(img)
         except Exception as exc:
-            raise OCRError(
-                f"Failed to convert PDF to images: {exc}"
-            ) from exc
+            logger.error(f"OCR failed for image: {exc}")
+            return ""
 
-    def _process_pdf_direct(self, pdf_path: str) -> list[str]:
+    def _tesseract_ocr(self, img: np.ndarray) -> str:
         """
-        Attempt to extract text directly from a PDF using PyMuPDF.
-        Returns a list of strings (one per page).
+        High-precision Tesseract pipeline including denoising and contrast boost.
         """
+        try:
+            # 1. Convert to grayscale
+            if len(img.shape) == 3:
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            else:
+                gray = img
+
+            # 2. Denoising (Vital for phone photos / noisy scans)
+            # Parameters h=10, searchWindow=21 are good for document grain
+            denoised = cv2.fastNlMeansDenoising(gray, None, 10, 7, 21)
+
+            # 3. High-Contrast Binarization (Otsu's method)
+            # Tesseract loves clean black-on-white text
+            _, binary = cv2.threshold(denoised, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+            # 4. Add a small white border (Padding)
+            # Helps Tesseract when text is too close to edges
+            binary = cv2.copyMakeBorder(binary, 10, 10, 10, 10, cv2.BORDER_CONSTANT, value=255)
+
+            # 5. Extract
+            text = pt.image_to_string(
+                binary,
+                lang=self.lang,
+                config=self.tesseract_config
+            )
+            return text.strip()
+        except Exception as exc:
+            logger.warning(f"Tesseract inference error: {exc}")
+            return ""
+
+    # ------------------------------------------------------------------
+    # PDF Logic
+    # ------------------------------------------------------------------
+    def _process_pdf_direct(self, pdf_path: str) -> List[str]:
         try:
             doc = fitz.open(pdf_path)
-            page_texts = []
-            for page in doc:
-                text = page.get_text("text")
-                page_texts.append(text.strip())
-            return page_texts
-        except Exception as e:
-            logger.warning(f"Direct PDF extraction failed: {e}")
+            return [page.get_text("text").strip() for page in doc]
+        except:
             return []
 
-    def _process_pdf_ocr(self, pdf_path: str, return_list: bool = False) -> str | list[str]:
-        """
-        Convert a PDF to images, run OCR on each page in parallel, and return
-        the results.
-        """
+    def _process_pdf_ocr(self, pdf_path: str, return_list: bool = False) -> Union[str, List[str]]:
         from concurrent.futures import ThreadPoolExecutor
+        from pdf2image import convert_from_path # type: ignore
 
-        images = self._convert_pdf_to_images(pdf_path)
-        num_pages = len(images)
-        
-        max_workers = min(num_pages, 8) # Increased workers for faster page processing
-
-        logger.info("Starting parallel OCR on %d pages using %d workers", num_pages, max_workers)
-        
-        def process_page(args):
-            page_num, pil_img = args
-            preprocessed = preprocess_pil_image(pil_img)
-            text = self._extract_from_image(preprocessed)
-            return page_num, text
-
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            results = list(executor.map(process_page, enumerate(images, start=1)))
-
-        results.sort(key=lambda x: x[0])
-        page_texts = [text for _, text in results]
-        
-        if return_list:
-            return page_texts
+        try:
+            images = convert_from_path(pdf_path, dpi=300, thread_count=4, poppler_path=self.poppler_path)
             
-        return "\n\n".join(page_texts)
+            def ocr_page(args):
+                page_num, pil_img = args
+                # Use standard grayscale preprocessing for Tesseract
+                # We do the denoising inside _tesseract_ocr
+                text = self._extract_from_image(pil_img)
+                return page_num, text
+
+            with ThreadPoolExecutor(max_workers=min(len(images), 8)) as executor:
+                results = list(executor.map(ocr_page, enumerate(images, start=1)))
+
+            results.sort(key=lambda x: x[0])
+            texts = [r[1] for r in results]
+
+            return texts if return_list else "\n\n".join(texts)
+        except Exception as exc:
+            raise OCRError(f"PDF OCR failed: {exc}")
 
 
-# ---------------------------------------------------------------------------
-# Backward-compatible convenience function
-# ---------------------------------------------------------------------------
-def run_ocr(image_path) -> str:
-    """
-    Extract text from an image or PDF.
-
-    This is a thin wrapper around :class:`OCREngine` kept for backward
-    compatibility with existing callers.
-    """
+def run_ocr(path: str) -> str:
+    """Backward-compatible entry point."""
     engine = OCREngine()
-    return engine.process(image_path)
+    res = engine.process(path)
+    return res[0] if isinstance(res, list) else res

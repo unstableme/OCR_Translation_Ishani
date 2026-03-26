@@ -14,3 +14,5 @@ alembic
 pymupdf
 python-docx
 docx2txt
+paddleocr>=2.7.0
+paddlepaddle

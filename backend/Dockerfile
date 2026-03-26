@@ -9,6 +9,8 @@ ENV PYTHONUNBUFFERED=1
 WORKDIR /app
 
 # Install system dependencies
+# libgomp1  → required by PaddleOCR / PaddlePaddle (OpenMP runtime)
+# libglib2.0-0, libgl1 → required by OpenCV
 RUN apt-get update && apt-get install -y \
     tesseract-ocr \
     tesseract-ocr-nep \
@@ -17,6 +19,7 @@ RUN apt-get update && apt-get install -y \
     libgl1 \
     libglib2.0-0 \
     libpq-dev \
+    libgomp1 \
     gcc \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
