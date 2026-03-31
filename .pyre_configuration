@@ -1,0 +1,10 @@
+{
+  "source_directories": [
+    "backend"
+  ],
+  "search_path": [
+    "backend"
+  ],
+  "site_package_search_strategy": "pep561",
+  "virtual_environment": "backend/venv"
+}

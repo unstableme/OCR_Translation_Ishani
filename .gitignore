@@ -39,6 +39,13 @@ logs/
 Thumbs.db
 
 # Project Specific
+tmp/
 backend/uploads/
+!backend/uploads/.gitkeep
+backend/debug_preprocessing/
 backend/ocr_db_v2.db
 backend/.env
+backend/ocr.log
+backend/test_accuracy_results/
+backend/test_final.txt
+backend/test_result.txt
