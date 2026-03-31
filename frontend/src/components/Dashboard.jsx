@@ -422,6 +422,8 @@ const Dashboard = () => {
                                     <div className="text-box highlight scrollable">
                                         {activeTab === 'translated' ? result.translated_text : result.extracted_text}
                                     </div>
+                                    
+                                    {/* Results are now clean and focused only on text */}
 
                                     <div className="result-footer">
                                         <p className="status-badge success">

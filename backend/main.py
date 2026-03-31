@@ -51,7 +51,7 @@ app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 # Create database tables on startup
 #Base.metadata.create_all(bind=engine)
 
-# Shared OCR engine instance
+# Shared OCR engine instance (now uses Hybrid under the hood)
 ocr_engine = OCREngine()
 
 
@@ -213,9 +213,15 @@ async def upload_file(
 
         # --- 2. OCR Processing ---
         t_ocr_start = time.time()
-        # process now returns a list of strings (one per page)
-        extracted_pages = ocr_engine.process(file_path)
+        # Detailed result includes text, confidence, and bounding boxes
+        detailed_result = ocr_engine.process_detailed(file_path)
+        extracted_pages = [p["text"] for p in detailed_result["pages"]]
         extracted_text = "\n\n".join(extracted_pages)
+        avg_confidence = (
+            sum(p["confidence"] for p in detailed_result["pages"])
+            / len(detailed_result["pages"])
+            if detailed_result["pages"] else 0.0
+        )
         
         t_ocr_end = time.time()
         ocr_duration = t_ocr_end - t_ocr_start
@@ -263,6 +269,9 @@ async def upload_file(
             "extracted_text": extracted_text,
             "translated_text": translated_text,
             "file_url": f"/uploads/{filename}",
+            "ocr_confidence": round(avg_confidence, 4),
+            "ocr_pages": detailed_result["pages"],
+            "debug_image_urls": detailed_result.get("debug_images", []),
             "timing": {
                 "file_upload_seconds": round(upload_duration, 2),
                 "ocr_processing_seconds": round(ocr_duration, 2),

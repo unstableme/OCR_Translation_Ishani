@@ -2,7 +2,7 @@ fastapi
 uvicorn[standard]
 sqlalchemy
 pytesseract
-opencv-python
+opencv-python-headless
 numpy
 python-multipart
 openai
@@ -14,3 +14,6 @@ alembic
 pymupdf
 python-docx
 docx2txt
+python-doctr[torch]
+torch
+torchvision
