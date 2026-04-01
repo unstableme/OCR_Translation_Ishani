@@ -1,4 +1,4 @@
-# Use an official Python runtime as a parent image
+# Use an official Python runtime as a parent image (slim for smaller size)
 FROM python:3.10-slim
 
 # Set environment variables
@@ -9,6 +9,9 @@ ENV PYTHONUNBUFFERED=1
 WORKDIR /app
 
 # Install system dependencies
+# gcc and libpq-dev are needed for psycopg2
+# libgl1 and libglib2.0-0 for OpenCV
+# tesseract-ocr(-nep) for OCR engine
 RUN apt-get update && apt-get install -y \
     tesseract-ocr \
     tesseract-ocr-nep \
@@ -20,16 +23,15 @@ RUN apt-get update && apt-get install -y \
     gcc \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Copy the requirements file into the container at /app
+# Install python dependencies
 COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
-# Install any needed packages specified in requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy the rest of the application code into the container
+# Copy the rest of the application code
 COPY . .
 
-# Create uploads directory
+# Create uploads and debug directories
 RUN mkdir -p uploads
 
 # Expose port 8000

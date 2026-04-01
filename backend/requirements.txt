@@ -1,19 +1,29 @@
+# Core APIs
 fastapi
 uvicorn[standard]
 sqlalchemy
-pytesseract
-opencv-python-headless
-numpy
 python-multipart
 openai
 python-dotenv
-pdf2image
-Pillow
+
+# Database
 psycopg2-binary
 alembic
+
+# OCR Engine Core
+pytesseract
+opencv-python-headless
+numpy
+pdf2image
+Pillow
+
+# PDF & Document Processing
 pymupdf
 python-docx
 docx2txt
-python-doctr[torch]
+
+# Machine Learning - FORCING CPU TO REDUCE IMAGE SIZE (~2GB Saved)
+--extra-index-url https://download.pytorch.org/whl/cpu
 torch
 torchvision
+python-doctr[torch]
