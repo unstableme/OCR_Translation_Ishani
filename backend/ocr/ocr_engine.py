@@ -88,32 +88,36 @@ class TesseractOCREngine:
     def process_image(self, image: np.ndarray) -> dict:
         """
         Run Tesseract on a preprocessed numpy image.
+        Uses a SINGLE image_to_data call and reconstructs structured text
+        from the output — preserving line and paragraph breaks.
 
         Returns
         -------
         dict  ``{"pages": [{"text", "confidence", "boxes"}]}``
         """
         try:
-            # 1. Get structural text (preserves layout/newlines)
-            full_text = pt.image_to_string(
-                image, lang=self.lang, config=self.tesseract_config,
-            ).strip()
-
-            # 2. Get detailed data for confidence and boxes
+            # Single Tesseract call — get everything from image_to_data
             data = pt.image_to_data(
                 image, lang=self.lang, config=self.tesseract_config,
                 output_type=pt.Output.DICT,
             )
 
-            # Build word-level boxes and compute average confidence
+            # Reconstruct structured text preserving line/paragraph breaks
             confidences, boxes = [], []
-            for i, word in enumerate(data["text"]):
-                word = word.strip()
+            lines_by_block = {}  # {(block_num, par_num, line_num): [words]}
+            block_nums_seen = []  # Track block ordering
+
+            for i, word_text in enumerate(data["text"]):
+                word_text = word_text.strip()
                 conf = int(data["conf"][i])
-                if word and conf > 0:
+                block_num = data["block_num"][i]
+                par_num = data["par_num"][i]
+                line_num = data["line_num"][i]
+
+                if word_text and conf > 0:
                     confidences.append(conf / 100.0)
                     boxes.append({
-                        "text": word,
+                        "text": word_text,
                         "confidence": round(float(conf / 100.0), 4),
                         "bbox": [
                             data["left"][i],
@@ -123,6 +127,27 @@ class TesseractOCREngine:
                         ],
                     })
 
+                    key = (block_num, par_num, line_num)
+                    if key not in lines_by_block:
+                        lines_by_block[key] = []
+                    lines_by_block[key].append(word_text)
+
+                    if block_num not in block_nums_seen:
+                        block_nums_seen.append(block_num)
+
+            # Build structured text: lines joined by space, paragraphs by newline,
+            # blocks separated by double-newline
+            text_parts = []
+            prev_block = None
+            for key in sorted(lines_by_block.keys()):
+                block_num, par_num, line_num = key
+                line_text = " ".join(lines_by_block[key])
+                if prev_block is not None and block_num != prev_block:
+                    text_parts.append("")  # Double-newline between blocks
+                text_parts.append(line_text)
+                prev_block = block_num
+
+            full_text = "\n".join(text_parts).strip()
             avg_conf = sum(confidences) / len(confidences) if confidences else 0.0
             return _make_result([_make_page_result(full_text, avg_conf, boxes)])
 
@@ -282,131 +307,195 @@ class HybridOCREngine:
 
     def process_image(self, image: np.ndarray, debug_filename: Optional[str] = None) -> dict:
         """
-        REGION-AWARE Hybrid OCR with docTR Masking:
-        1. Segment regions using docTR layout analysis.
-        2. Create a Text Mask (Brain-like noise ignore).
-        3. OCR regions individually with specialized Tesseract params.
-        4. Stitch results.
+        TESSERACT-FIRST Hybrid OCR (Multi-PSM):
+        1. Try multiple Tesseract page segmentation modes to maximize extraction.
+        2. Pick the result that extracted the most text.
+        3. If all modes produce very little text → fall back to docTR layout + parallel Tesseract.
         """
         import time
-        ts = int(time.time())
-        # --- 1. Layout Analysis ---
+        t_start = time.time()
+
+        # ============================================================
+        # FAST PATH: Multi-PSM Tesseract
+        # --psm 4: Single column of variable sizes (best for government letters)
+        # --psm 6: Uniform block of text (good for body-heavy documents)
+        # --psm 3: Fully automatic segmentation (general fallback)
+        # ============================================================
+        best_result = None
+        best_text_len = 0
+        best_conf = 0.0
+        best_psm = ""
+
+        psm_modes = ["--psm 4", "--psm 6", "--psm 3"]
+
+        for psm in psm_modes:
+            engine = TesseractOCREngine(
+                lang=self.tesseract.lang,
+                tesseract_config=psm,
+                preprocess_config=self.preprocess_config,
+            )
+            result = engine.process_image(image)
+            page = result["pages"][0]
+            text = page["text"].strip()
+            conf = page["confidence"]
+
+            logger.info("[Hybrid] Tried %s: text_len=%d, conf=%.4f", psm, len(text), conf)
+
+            # Pick the mode that extracted the most text
+            if len(text) > best_text_len:
+                best_result = result
+                best_text_len = len(text)
+                best_conf = conf
+                best_psm = psm
+
+            # Early exit: substantial text with good confidence — no need to try more modes
+            if len(text) > 500 and conf >= self.threshold:
+                logger.info("[Hybrid] Early exit on %s (text_len=%d > 500, conf=%.4f >= %.2f)",
+                            psm, len(text), conf, self.threshold)
+                break
+
+        t_fast = time.time() - t_start
+        logger.info("[Hybrid] Fast path complete in %.2fs — best_psm=%s, best_text_len=%d, best_conf=%.4f",
+                    t_fast, best_psm, best_text_len, best_conf)
+
+        # Accept fast path if Tesseract extracted meaningful content
+        # For a full-page document, even partial extraction should give > 100 chars
+        if best_text_len > 100:
+            logger.info("[Hybrid] Fast path ACCEPTED (text_len=%d > 100, psm=%s)",
+                        best_text_len, best_psm)
+            best_result["diagnostic_url"] = None
+            best_result["ocr_strategy"] = f"tesseract_multi_psm_{best_psm.replace('--', '')}"
+            return best_result
+
+        # ============================================================
+        # SLOW PATH: docTR layout detection + parallel Tesseract on crops
+        # Only triggered when Tesseract truly fails (< 100 chars extracted)
+        # ============================================================
+        logger.info("[Hybrid] Fast path rejected (best_text_len=%d < 100). "
+                    "Falling back to docTR layout + parallel Tesseract...",
+                    best_text_len)
+
+        # --- 1. Layout Analysis via docTR ---
         try:
             blocks = self.doctr.get_blocks(image)
         except Exception as e:
             import traceback
-            logger.warning("Region analysis failed: %s\n%s. Falling back to global Tesseract.", e, traceback.format_exc())
-            return self.tesseract.process_image(image)
+            logger.warning("docTR layout analysis failed: %s\n%s. Returning best Tesseract result.",
+                           e, traceback.format_exc())
+            if best_result:
+                best_result["diagnostic_url"] = None
+                best_result["ocr_strategy"] = "tesseract_multi_psm_doctr_failed"
+                return best_result
+            return _make_result([_make_page_result("", 0.0)])
 
         if not blocks:
-            logger.info("No blocks detected. Using global Tesseract.")
-            return self.tesseract.process_image(image)
+            logger.info("No blocks detected by docTR. Returning best Tesseract result.")
+            if best_result:
+                best_result["diagnostic_url"] = None
+                best_result["ocr_strategy"] = "tesseract_multi_psm_no_blocks"
+                return best_result
+            return _make_result([_make_page_result("", 0.0)])
 
-        # --- 2. Create Intelligent Mask (Selective Whitening) ---
+        # --- 2. Intelligent Masking (sidebar noise removal) ---
+        ts = int(time.time())
         h_img, w_img = image.shape[:2]
-        
-        # --- 2. Create Smart-Balance Mask ---
-        # We target the right 15% for noise, but skip anything the AI thinks is text.
         sidebar_w = int(w_img * 0.15)
         sidebar_x = w_img - sidebar_w
-        
+
         masked_image = image.copy()
-        
-        # Create a boolean track of text areas ('The Protection Shield')
         text_mask = np.zeros((h_img, w_img), dtype=np.uint8)
-        
+
         for block in blocks:
             for word_bbox in block.get("words", []):
                 wx1, wy1, wx2, wy2 = word_bbox
-                # Expand box generously to protect character edges and line endings
-                # +5 Left, +25 Right (Maximum protection), ±10 Vertical
-                wx1, wy1 = max(0, wx1-5), max(0, wy1-10) 
+                wx1, wy1 = max(0, wx1-5), max(0, wy1-10)
                 wx2, wy2 = min(w_img, wx2+25), min(h_img, wy2+10)
                 text_mask[wy1:wy2, wx1:wx2] = 1
 
-        # TARGETED NOISE REMOVAL: 
-        # Only white out pixels that are in the sidebar AND are NOT protected by our text shield.
-        # This deletes the vertical noise lines but leaves the 'Mahanagarpalika' endings alone.
         sidebar_area = masked_image[:, sidebar_x:]
         sidebar_protection = text_mask[:, sidebar_x:]
-        
-        # Apply whitening only to unprotected pixels in the sidebar
         sidebar_area[sidebar_protection == 0] = 255
         masked_image[:, sidebar_x:] = sidebar_area
-        
-        # Save diagnostic view with TIMESTAMP (Bust Caching)
+
+        # Save diagnostic view
         dbg_base = debug_filename if debug_filename else "smart_mask_debug"
         dbg_name = f"{dbg_base}_{ts}.png"
         masked_dbg_path = os.path.join("uploads/debug", dbg_name)
         cv2.imwrite(masked_dbg_path, masked_image)
         diagnostic_url = f"/uploads/debug/{dbg_name}"
-        
-        # Use the smart-balanced image for Tesseract
-        image = masked_image
 
-        # --- 3. Process Regions ---
+        # --- 3. Parallel Tesseract on blocks ---
+        blocks.sort(key=lambda b: b["bbox"][1])
+
+        def _process_block(args):
+            """Process a single block crop with Tesseract."""
+            idx, block = args
+            x1, y1, x2, y2 = block["bbox"]
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(w_img, x2), min(h_img, y2)
+
+            if x2 <= x1 or y2 <= y1:
+                return idx, None
+
+            crop = masked_image[y1:y2, x1:x2]
+
+            # Heuristic: small blocks → metadata (चलानी, मिति)
+            is_metadata = (y2 - y1) < 80 or (x2 - x1) < (w_img * 0.4)
+
+            if is_metadata:
+                crop = cv2.resize(crop, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+                psm = "--psm 7"
+            else:
+                psm = "--psm 6"
+
+            engine = TesseractOCREngine(
+                lang=self.tesseract.lang,
+                tesseract_config=psm,
+                preprocess_config=self.preprocess_config
+            )
+            region_res = engine.process_image(crop)
+            region_page = region_res["pages"][0]
+
+            text = region_page["text"].strip()
+            if not text:
+                return idx, None
+
+            # Adjust bounding boxes back to full-page coordinates
+            for box in region_page["boxes"]:
+                bx1, by1, bx2, by2 = box["bbox"]
+                if is_metadata:
+                    bx1, by1, bx2, by2 = bx1 // 2, by1 // 2, bx2 // 2, by2 // 2
+                box["bbox"] = [bx1 + x1, by1 + y1, bx2 + x1, by2 + y1]
+
+            return idx, region_page
+
+        # Run blocks in parallel (up to 6 threads)
+        max_workers = min(len(blocks), 6)
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            results = list(pool.map(_process_block, enumerate(blocks)))
+
+        # Sort by original index and stitch
+        results.sort(key=lambda x: x[0])
+
         all_text_parts = []
         all_boxes = []
         all_confidences = []
-
-        # Sort blocks top-to-bottom for structural coherence
-        blocks.sort(key=lambda b: b["bbox"][1])
-
-        for i, block in enumerate(blocks):
-            x1, y1, x2, y2 = block["bbox"]
-            # Ensure coordinates are within bounds
-            h_img, w_img = image.shape[:2]
-            x1, y1 = max(0, x1), max(0, y1)
-            x2, y2 = min(w_img, x2), min(h_img, y2)
-            
-            if x2 <= x1 or y2 <= y1:
+        for _, page_data in results:
+            if page_data is None:
                 continue
+            all_text_parts.append(page_data["text"])
+            all_boxes.extend(page_data["boxes"])
+            all_confidences.append(page_data["confidence"])
 
-            crop = image[y1:y2, x1:x2]
-            
-            # --- 3. Classification & Specialized OCR ---
-            # Heuristic: Small blocks at the top/sides are likely Metadata (चलानी नं, मिति)
-            is_metadata = (y2 - y1) < 80 or (x2 - x1) < (w_img * 0.4)
-            
-            if is_metadata:
-                # UPSCALE small metadata regions for better digit recognition
-                crop = cv2.resize(crop, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
-                # Use --psm 7 (Assume single line of text)
-                engine = TesseractOCREngine(
-                    lang=self.tesseract.lang,
-                    tesseract_config="--psm 7", 
-                    preprocess_config=self.preprocess_config
-                )
-            else:
-                # Use --psm 6 (Assume single uniform block of text)
-                engine = TesseractOCREngine(
-                    lang=self.tesseract.lang,
-                    tesseract_config="--psm 6",
-                    preprocess_config=self.preprocess_config
-                )
-
-            region_res = engine.process_image(crop)
-            region_page = region_res["pages"][0]
-            
-            text = region_page["text"].strip()
-            if text:
-                all_text_parts.append(text)
-                # Adjust bounding boxes back to original page coordinates
-                for box in region_page["boxes"]:
-                    bx1, by1, bx2, by2 = box["bbox"]
-                    if is_metadata:
-                        bx1, by1, bx2, by2 = bx1//2, by1//2, bx2//2, by2//2
-                    
-                    box["bbox"] = [bx1 + x1, by1 + y1, bx2 + x1, by2 + y1]
-                    all_boxes.append(box)
-                all_confidences.append(region_page["confidence"])
-
-        # --- 4. Stitch Results ---
         full_text = "\n\n".join(all_text_parts)
         avg_conf = sum(all_confidences) / len(all_confidences) if all_confidences else 0.0
-        
+
+        t_slow = time.time() - t_start
+        logger.info("[Hybrid] Slow path done in %.2fs — confidence=%.4f", t_slow, avg_conf)
+
         result = _make_result([_make_page_result(full_text, avg_conf, all_boxes)])
         result["diagnostic_url"] = diagnostic_url
+        result["ocr_strategy"] = "doctr_layout_parallel_tesseract"
         return result
 
     def process_pdf(self, pdf_path: str, poppler_path: Optional[str] = None) -> dict:
@@ -445,6 +534,9 @@ def _convert_pdf_to_images(pdf_path: str, poppler_path: Optional[str] = None) ->
         ) from exc
 
     try:
+        # NOTE: 150 DPI is the sweet spot for Tesseract Nepali OCR.
+        # Higher DPI (160/200) causes Tesseract PSM segmentation failures
+        # and 2-3x slower processing. Do NOT change without testing.
         kwargs = {"pdf_path": pdf_path, "dpi": 150, "thread_count": 4}
         if poppler_path:
             kwargs["poppler_path"] = poppler_path
@@ -641,14 +733,6 @@ class OCREngine:
             diag_url
         ] if diag_url else [f"/uploads/debug/{debug_filename}"]
         
-        return result
-
-        if self.debug_boxes and result["pages"]:
-            _draw_debug_boxes(
-                preprocessed, result["pages"][0]["boxes"],
-                "debug_preprocessing/boxes_output.png",
-            )
-
         return result
 
     # ------------------------------------------------------------------

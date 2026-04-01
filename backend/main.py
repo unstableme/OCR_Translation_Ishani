@@ -196,20 +196,26 @@ async def upload_file(
         os.makedirs("uploads", exist_ok=True)
         file_path = f"uploads/{filename}"
 
+        # Optimization: Use a single read and write
+        file_content = await file.read()
         with open(file_path, "wb") as f:
-            f.write(await file.read())
+            f.write(file_content)
         
         t_upload_end = time.time()
         upload_duration = t_upload_end - t_upload_start
 
+        # Create Document object but defer final commit to reduce overhead
         doc = Document(
             original_filename=filename,
             stored_path=file_path,
             status="Processing",
         )
         db.add(doc)
-        db.commit()
-        db.refresh(doc)
+        db.flush() # Get the ID without full commit yet
+        doc_id = doc.id
+        
+        t_db_init_end = time.time()
+        db_init_duration = t_db_init_end - t_upload_end
 
         # --- 2. OCR Processing ---
         t_ocr_start = time.time()
@@ -233,37 +239,47 @@ async def upload_file(
         t_llm_end = time.time()
         llm_duration = t_llm_end - t_llm_start
 
-        # --- DB Updates ---
+        # --- 4. Final DB Updates (Consolidated) ---
+        t_db_final_start = time.time()
+        
         ocr_result = OCRResult(
-            document_id=doc.id,
+            document_id=doc_id,
             extracted_text=extracted_text,
             status="Extracted",
         )
         db.add(ocr_result)
-        db.commit()
-        db.refresh(ocr_result)
 
         translated_result = Translation(
-            document_id=doc.id,
+            document_id=doc_id,
             translated_text=translated_text,
             model_used=model_used,
             status="Completed",
         )
         db.add(translated_result)
-        db.commit()
-        db.refresh(translated_result)
 
         doc.status = "Completed"
-        db.commit()
+        db.commit() # Single commit for all results
+        
+        t_db_final_end = time.time()
+        db_final_duration = t_db_final_end - t_db_final_start
 
         total_duration = time.time() - t0
         
-        # Log results
-        logger.info(f"PERFORMANCE: Total={total_duration:.2f}s | Upload={upload_duration:.2f}s | OCR={ocr_duration:.2f}s | LLM={llm_duration:.2f}s")
+        # Log detailed Telemetry
+        telemetry = (
+            f"TELEMETRY: Total={total_duration:.2f}s | "
+            f"Upload={upload_duration:.2f}s | "
+            f"DB_Init={db_init_duration:.2f}s | "
+            f"OCR={ocr_duration:.2f}s | "
+            f"LLM={llm_duration:.2f}s | "
+            f"DB_Final={db_final_duration:.2f}s"
+        )
+        logger.info(telemetry)
+        print(telemetry) # Ensure it's visible in terminal
 
         return {
             "message": "Document processed successfully",
-            "document_id": doc.id,
+            "document_id": doc_id,
             "ocr_result_id": ocr_result.id,
             "translation_id": translated_result.id,
             "extracted_text": extracted_text,
@@ -271,11 +287,14 @@ async def upload_file(
             "file_url": f"/uploads/{filename}",
             "ocr_confidence": round(avg_confidence, 4),
             "ocr_pages": detailed_result["pages"],
+            "ocr_strategy": detailed_result.get("ocr_strategy", "unknown"),
             "debug_image_urls": detailed_result.get("debug_images", []),
             "timing": {
                 "file_upload_seconds": round(upload_duration, 2),
+                "db_init_seconds": round(db_init_duration, 2),
                 "ocr_processing_seconds": round(ocr_duration, 2),
                 "llm_api_response_seconds": round(llm_duration, 2),
+                "db_final_seconds": round(db_final_duration, 2),
                 "total_processing_seconds": round(total_duration, 2)
             }
         }

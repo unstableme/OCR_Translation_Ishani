@@ -68,8 +68,45 @@ const LoadingState = () => {
                 <div className="progress-bar-container">
                     <div className="progress-bar-fill"></div>
                 </div>
-                <p className="loading-hint">This usually takes about 15 seconds</p>
+                <p className="loading-hint">This usually takes about 5-10 seconds</p>
             </div>
+        </div>
+    );
+};
+
+const TypewriterText = ({ text = "", speed = 30 }) => {
+    const [displayedText, setDisplayedText] = useState("");
+    const [index, setIndex] = useState(0);
+
+    // Ensure we are working with a string
+    const safeText = React.useMemo(() => {
+        if (Array.isArray(text)) return text.join("\n\n");
+        if (typeof text !== "string") return String(text || "");
+        return text;
+    }, [text]);
+
+    React.useEffect(() => {
+        setDisplayedText("");
+        setIndex(0);
+    }, [safeText]);
+
+    React.useEffect(() => {
+        const words = safeText.split(" ");
+        if (index < words.length && safeText) {
+            const timer = setTimeout(() => {
+                setDisplayedText((prev) => prev + (prev ? " " : "") + (words[index] || ""));
+                setIndex(index + 1);
+            }, speed);
+            return () => clearTimeout(timer);
+        }
+    }, [index, safeText, speed]);
+
+    return (
+        <div className="typewriter-content">
+            {displayedText}
+            {safeText && index < safeText.split(" ").length && (
+                <span className="typewriter-cursor">|</span>
+            )}
         </div>
     );
 };
@@ -133,6 +170,11 @@ const Dashboard = () => {
     const handleTranslate = async () => {
         if (inputMode === 'file' && !file) {
             setError('Please upload a document or use the sample document first.');
+            return;
+        }
+
+        if (targetLang !== 'Nepali') {
+            setError(`${targetLang} translation is currently unavailable. We are working on it!`);
             return;
         }
 
@@ -265,10 +307,38 @@ const Dashboard = () => {
                     {/* Left Panel: Upload & Preview */}
                     <div className="panel left-panel glass-panel animate-fade-in">
                         <div className="panel-header">
-                            <h2><RefreshCw size={20} /> Input Source</h2>
+                            <h2><RefreshCw size={20} /> Input & Language</h2>
                         </div>
 
                         <div className="upload-area">
+                            <div className="language-selectors">
+                                <div className="selector-group">
+                                    <label>Source Language</label>
+                                    <select 
+                                        className="lang-select" 
+                                        value={sourceLang} 
+                                        onChange={(e) => setSourceLang(e.target.value)}
+                                    >
+                                        <option value="Tamang/Newari">Auto-Detect (Himalayan)</option>
+                                        <option value="Tamang">Tamang</option>
+                                        <option value="Newari">Nepal Bhasa (Newari)</option>
+                                        <option value="Nepali">Nepali</option>
+                                    </select>
+                                </div>
+                                <div className="selector-group">
+                                    <label>Target Language</label>
+                                    <select 
+                                        className="lang-select" 
+                                        value={targetLang} 
+                                        onChange={(e) => setTargetLang(e.target.value)}
+                                    >
+                                        <option value="Nepali">Nepali</option>
+                                        <option value="Tamang">Tamang</option>
+                                        <option value="Nepal Bhasa">Nepal Bhasa (Newari)</option>
+                                    </select>
+                                </div>
+                            </div>
+
                             <div className="mode-toggle">
                                 <button
                                     className={`mode-btn ${inputMode === 'file' ? 'active' : ''}`}
@@ -420,7 +490,11 @@ const Dashboard = () => {
                                     </div>
 
                                     <div className="text-box highlight scrollable">
-                                        {activeTab === 'translated' ? result.translated_text : result.extracted_text}
+                                        {activeTab === 'translated' ? (
+                                            <TypewriterText text={result.translated_text} />
+                                        ) : (
+                                            result.extracted_text
+                                        )}
                                     </div>
                                     
                                     {/* Results are now clean and focused only on text */}
