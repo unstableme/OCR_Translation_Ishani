@@ -31,18 +31,14 @@ DEFAULT_CONFIG = {
     "binarize": False,            # Transition to Soft (Grayscale) OCR
     "morphological_cleanup": False,
     "remove_lines": False,         # IMPORTANT: Can destroy Devanagari Shirorekas
-    "remove_vertical_noise": False, # DISABLED: User requested zero interference
-    "remove_sidebar_noise": False,  # DISABLED: User requested zero interference
+    "remove_vertical_noise": False, 
+    "remove_sidebar_noise": False,  
     "thin_characters": False,       # Erosion can hurt LSTM accuracy
     "sharpen": False,
     "debug": False,
     "debug_output_dir": "debug_preprocessing",
 }
 
-
-# ===================================================================
-# Public API
-# ===================================================================
 
 def preprocess_image(image_path: str, config: Optional[dict] = None) -> np.ndarray:
     """
