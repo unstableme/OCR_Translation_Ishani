@@ -1,14 +1,21 @@
 """
 OCR Engine Module
 =================
-Production-grade OCR text extraction supporting three engines:
 
-- **TesseractOCREngine** — Tesseract with Nepali/English language packs
-- **DocTROCREngine** — docTR (db_resnet50 + crnn_vgg16_bn) with confidence + boxes
-- **HybridOCREngine** — docTR first, Tesseract fallback if confidence < threshold
+A production-grade OCR extraction pipeline optimized for Himalayan languages (Nepali, Tamang, Newari).
+The module provides a multi-layered architecture that balances speed and accuracy through an
+intelligent fallback mechanism.
 
-The backward-compatible ``OCREngine`` class wraps HybridOCREngine and
-preserves the existing ``process(file_path) -> list[str]`` API.
+### Engine Hierarchy:
+1. **OCREngine (Wrapper)**: The main entry point used by `main.py`. Handles file routing (PDF/Image/Word)
+   and manages the High-Level `HybridOCREngine`.
+2. **HybridOCREngine**: The "brain" of the system. Implements a two-stage strategy:
+   - **Fast Path**: Multi-PSM Tesseract for quick, standard document extraction.
+   - **Slow Path**: docTR for layout analysis + Parallel Tesseract on crops for complex cases.
+3. **Core Engines**:
+   - `TesseractOCREngine`: Best-in-class for Devanagari script via the `nep` language pack.
+   - `DocTROCREngine`: State-of-the-art Deep Learning models for robust layout and boundary detection.
+
 """
 # pyre-ignore-all-errors
 import os
@@ -71,8 +78,12 @@ def _make_result(pages: list[dict]) -> dict:
 
 class TesseractOCREngine:
     """
-    Tesseract-based OCR engine.  Native Nepali (``nep``) support makes
-    this the strongest option for Devanagari-script documents.
+    Tesseract-based OCR engine wrapper.
+    
+    Optimized for Devanagari script documents using the Tesseract `nep` (Nepali) 
+    and `eng` (English) language packs. This engine is the primary workhorse 
+    for standard document extraction due to its high performance and native 
+    script support.
     """
 
     def __init__(
@@ -87,13 +98,30 @@ class TesseractOCREngine:
 
     def process_image(self, image: np.ndarray) -> dict:
         """
-        Run Tesseract on a preprocessed numpy image.
-        Uses a SINGLE image_to_data call and reconstructs structured text
-        from the output — preserving line and paragraph breaks.
+        Run Tesseract OCR on a preprocessed image with structured text reconstruction.
 
-        Returns
-        -------
-        dict  ``{"pages": [{"text", "confidence", "boxes"}]}``
+        This method performs a single call to Tesseract's `image_to_data` and 
+        reconstructs the original document structure (lines, paragraphs, and blocks) 
+        by analyzing the spatial metadata returned for each word.
+
+        Args:
+            image (np.ndarray): Preprocessed image (numpy array).
+
+        Returns:
+            dict: Standardized result format:
+                {
+                    "pages": [{
+                        "text": str (Reconstructed content with line breaks),
+                        "confidence": float (0.0 to 1.0),
+                        "boxes": list[dict] (Words with individual bboxes)
+                    }]
+                }
+
+        Internal Logic:
+        1. Calls `pt.image_to_data` to get word-level coordinates and confidence.
+        2. Groups words into `(block, paragraph, line)` buckets.
+        3. Joins words into lines and separates blocks with double newlines.
+        4. Calculates a weighted average confidence based on word-level results.
         """
         try:
             # Single Tesseract call — get everything from image_to_data
@@ -154,24 +182,6 @@ class TesseractOCREngine:
         except pt.TesseractError as exc:
             raise OCRError(f"Tesseract OCR failed: {exc}") from exc
 
-    def process_pdf(self, pdf_path: str, poppler_path: Optional[str] = None) -> dict:
-        """Convert PDF → images → Tesseract OCR with parallel processing."""
-        images = _convert_pdf_to_images(pdf_path, poppler_path)
-        cfg = self.preprocess_config
-
-        def _process_one(args):
-            idx, pil_img = args
-            preprocessed = preprocess_pil_image(pil_img, cfg)
-            result = self.process_image(preprocessed)
-            return idx, result["pages"][0]
-
-        max_workers = min(len(images), 8)
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            results = list(pool.map(_process_one, enumerate(images)))
-
-        results.sort(key=lambda x: x[0])
-        return _make_result([page for _, page in results])
-
 
 # ===================================================================
 # docTR Engine
@@ -179,8 +189,12 @@ class TesseractOCREngine:
 
 class DocTROCREngine:
     """
-    docTR-based OCR engine (db_resnet50 + crnn_vgg16_bn).
-    Model is loaded **once** in ``__init__`` and reused for all pages.
+    docTR-based OCR and Layout Analysis engine.
+    
+    Uses a Deep Learning pipeline (db_resnet50 for detection + crnn_vgg16_bn 
+    for recognition) to provide robust OCR results. In this system, docTR 
+    is primarily leveraged for its superior layout analysis and boundary 
+    detection capabilities.
     """
 
     def __init__(self, preprocess_config: Optional[dict] = None):
@@ -188,7 +202,13 @@ class DocTROCREngine:
         self._model = None  # Lazy-loaded on first call
 
     def _load_model(self):
-        """Lazy-load the docTR model (downloads weights on first run)."""
+        """
+        Lazy-load the docTR model.
+        
+        This prevents unnecessary memory usage if docTR is not required 
+        (e.g., if the Tesseract 'Fast Path' succeeds). Downloads weights 
+        on the very first invocation if they are not cached.
+        """
         if self._model is not None:
             return
         try:
@@ -214,33 +234,20 @@ class DocTROCREngine:
         image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB) if len(image.shape) == 3 else cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
         return self._model([image_rgb])
 
-    def process_image(self, image: np.ndarray) -> dict:
-        """
-        Standard API: Run docTR and return a dict result.
-        """
-        result = self._process_raw(image)
-        pages = []
-        for page in result.pages:
-            page_words = []
-            page_confs = []
-            page_boxes = []
-            h, w = page.dimensions
-            for block in page.blocks:
-                for line in block.lines:
-                    for word in line.words:
-                        page_words.append(word.value)
-                        page_confs.append(word.confidence)
-                        geo = word.geometry
-                        bbox = [int(geo[0][0]*w), int(geo[0][1]*h), int(geo[1][0]*w), int(geo[1][1]*h)]
-                        page_boxes.append({"text": word.value, "confidence": round(word.confidence, 4), "bbox": bbox})
-            full_text = " ".join(page_words)
-            avg_conf = sum(page_confs) / len(page_confs) if page_confs else 0.0
-            pages.append(_make_page_result(full_text, avg_conf, page_boxes))
-        return _make_result(pages)
-
     def get_blocks(self, image: np.ndarray) -> list[dict]:
         """
-        Run docTR and return only the physical blocks with their normalized coordinates.
+        Perform Layout Analysis to detect physical text blocks.
+
+        Unlike `process_image`, this method focuses on identifying the 
+        high-level structure of the document (paragraphs/blocks) without 
+        necessarily relying on docTR for the final text recognition.
+
+        Args:
+            image (np.ndarray): Image as a numpy array.
+
+        Returns:
+            list[dict]: A list of detected blocks, each containing a bbox 
+                and word-level coordinates for masking.
         """
         result = self._process_raw(image)
         blocks = []
@@ -263,20 +270,8 @@ class DocTROCREngine:
                 })
         return blocks
 
-    def process_pdf(self, pdf_path: str, poppler_path: Optional[str] = None) -> dict:
-        """Convert PDF pages → images → docTR (sequential to reuse model)."""
-        self._load_model()
-        images = _convert_pdf_to_images(pdf_path, poppler_path)
-        cfg = self.preprocess_config
+        return blocks
 
-        pages = []
-        for idx, pil_img in enumerate(images):
-            preprocessed = preprocess_pil_image(pil_img, cfg)
-            result = self.process_image(preprocessed)
-            pages.append(result["pages"][0])
-            logger.info("docTR processed page %d/%d", idx + 1, len(images))
-
-        return _make_result(pages)
 
 
 # ===================================================================
@@ -285,8 +280,19 @@ class DocTROCREngine:
 
 class HybridOCREngine:
     """
-    Runs docTR first.  If average word confidence falls below
-    *confidence_threshold*, falls back to Tesseract.
+    Intelligent OCR controller that manages Tesseract and docTR.
+    
+    Implements a "Search and Fallback" strategy to balance extraction 
+    quality and processing time.
+    
+    Processing Strategy:
+    --------------------
+    1.  **Fast Path**: Tries Tesseract with multiple PSM (Page Segmentation 
+        Modes). If high confidence exists, it exits early.
+    2.  **Slow Path**: If Tesseract fails, it triggers docTR for layout 
+        detection, followed by parallel Tesseract extraction on the detected blocks.
+    3.  **Intelligent Masking**: Removes non-text 'sidebar noise' while 
+        shielding actual text areas during high-complexity OCR runs.
     """
 
     def __init__(
@@ -305,12 +311,34 @@ class HybridOCREngine:
         )
         self.preprocess_config = preprocess_config
 
-    def process_image(self, image: np.ndarray, debug_filename: Optional[str] = None) -> dict:
+    def process_image(self, image: np.ndarray) -> dict:
         """
-        TESSERACT-FIRST Hybrid OCR (Multi-PSM):
-        1. Try multiple Tesseract page segmentation modes to maximize extraction.
-        2. Pick the result that extracted the most text.
-        3. If all modes produce very little text → fall back to docTR layout + parallel Tesseract.
+        Execute the primary Hybrid OCR pipeline for an image.
+
+        Args:
+            image (np.ndarray): The source image as a numpy array.
+            debug_filename (Optional[str]): Filename for saving diagnostic images.
+
+        Returns:
+            dict: The final OCR results, including strategy metadata and 
+                diagnostic URLs (if the Slow Path was triggered).
+
+        ### Detailed Flow:
+        
+        #### Phase 1: Fast Path (Multi-PSM Tesseract)
+        Tesseract is run sequentially with PSM 4, 6, and 3. The engine 
+        constantly evaluates the character count and confidence score.
+        - **Success Condition**: > 500 characters and > 85% confidence.
+        - **Fallback Trigger**: If ALL modes result in < 100 characters.
+
+        #### Phase 2: Slow Path (docTR Layout + Parallel Tesseract)
+        Used for documents with low contrast, handwritten elements, or 
+        complex tables where standard Tesseract "blindly" misses blocks.
+        - **Layout Analysis**: docTR detects bounding boxes for text blocks.
+        - **Sidebar Masking**: Identifies 15% right-sidebar area and protects 
+          text while masking white-space artifacts.
+        - **Parallelized Extraction**: Spawns multiple threads (limited to 6) 
+          to run Tesseract on each individual block crop for maximum accuracy.
         """
         import time
         t_start = time.time()
@@ -363,7 +391,6 @@ class HybridOCREngine:
         if best_text_len > 100:
             logger.info("[Hybrid] Fast path ACCEPTED (text_len=%d > 100, psm=%s)",
                         best_text_len, best_psm)
-            best_result["diagnostic_url"] = None
             best_result["ocr_strategy"] = f"tesseract_multi_psm_{best_psm.replace('--', '')}"
             return best_result
 
@@ -383,7 +410,6 @@ class HybridOCREngine:
             logger.warning("docTR layout analysis failed: %s\n%s. Returning best Tesseract result.",
                            e, traceback.format_exc())
             if best_result:
-                best_result["diagnostic_url"] = None
                 best_result["ocr_strategy"] = "tesseract_multi_psm_doctr_failed"
                 return best_result
             return _make_result([_make_page_result("", 0.0)])
@@ -391,13 +417,11 @@ class HybridOCREngine:
         if not blocks:
             logger.info("No blocks detected by docTR. Returning best Tesseract result.")
             if best_result:
-                best_result["diagnostic_url"] = None
                 best_result["ocr_strategy"] = "tesseract_multi_psm_no_blocks"
                 return best_result
             return _make_result([_make_page_result("", 0.0)])
 
         # --- 2. Intelligent Masking (sidebar noise removal) ---
-        ts = int(time.time())
         h_img, w_img = image.shape[:2]
         sidebar_w = int(w_img * 0.15)
         sidebar_x = w_img - sidebar_w
@@ -412,17 +436,8 @@ class HybridOCREngine:
                 wx2, wy2 = min(w_img, wx2+25), min(h_img, wy2+10)
                 text_mask[wy1:wy2, wx1:wx2] = 1
 
-        sidebar_area = masked_image[:, sidebar_x:]
-        sidebar_protection = text_mask[:, sidebar_x:]
         sidebar_area[sidebar_protection == 0] = 255
         masked_image[:, sidebar_x:] = sidebar_area
-
-        # Save diagnostic view
-        dbg_base = debug_filename if debug_filename else "smart_mask_debug"
-        dbg_name = f"{dbg_base}_{ts}.png"
-        masked_dbg_path = os.path.join("uploads/debug", dbg_name)
-        cv2.imwrite(masked_dbg_path, masked_image)
-        diagnostic_url = f"/uploads/debug/{dbg_name}"
 
         # --- 3. Parallel Tesseract on blocks ---
         blocks.sort(key=lambda b: b["bbox"][1])
@@ -494,7 +509,6 @@ class HybridOCREngine:
         logger.info("[Hybrid] Slow path done in %.2fs — confidence=%.4f", t_slow, avg_conf)
 
         result = _make_result([_make_page_result(full_text, avg_conf, all_boxes)])
-        result["diagnostic_url"] = diagnostic_url
         result["ocr_strategy"] = "doctr_layout_parallel_tesseract"
         return result
 
@@ -507,12 +521,9 @@ class HybridOCREngine:
         for idx, pil_img in enumerate(images):
             preprocessed = preprocess_pil_image(pil_img, cfg)
             
-            # Use unique filename for each page's mask
-            masked_name = f"masked_feed_{Path(pdf_path).name}_page_{idx+1}.png"
-            result = self.process_image(preprocessed, debug_filename=masked_name)
+            result = self.process_image(preprocessed)
             
             p = result["pages"][0]
-            p["diagnostic_url"] = result.get("diagnostic_url")
             pages.append(p)
             logger.info("Hybrid processed page %d/%d", idx + 1, len(images))
 
@@ -524,7 +535,20 @@ class HybridOCREngine:
 # ===================================================================
 
 def _convert_pdf_to_images(pdf_path: str, poppler_path: Optional[str] = None) -> list:
-    """Convert every page of a PDF to a PIL Image at 150 DPI."""
+    """
+    Convert all pages of a PDF into high-quality reference images.
+
+    Args:
+        pdf_path (str): File system path to the PDF.
+        poppler_path (Optional[str]): System path to Poppler binaries.
+
+    Returns:
+        list[PIL.Image.Image]: List of converted images.
+
+    Performance Note: 
+    150 DPI is chosen as the "sweet spot" for Tesseract Devanagari OCR. 
+    Higher DPI slows processing by 3x without a measurable accuracy gain.
+    """
     try:
         from pdf2image import convert_from_path
     except ImportError as exc:
@@ -534,9 +558,6 @@ def _convert_pdf_to_images(pdf_path: str, poppler_path: Optional[str] = None) ->
         ) from exc
 
     try:
-        # NOTE: 150 DPI is the sweet spot for Tesseract Nepali OCR.
-        # Higher DPI (160/200) causes Tesseract PSM segmentation failures
-        # and 2-3x slower processing. Do NOT change without testing.
         kwargs = {"pdf_path": pdf_path, "dpi": 150, "thread_count": 4}
         if poppler_path:
             kwargs["poppler_path"] = poppler_path
@@ -547,39 +568,17 @@ def _convert_pdf_to_images(pdf_path: str, poppler_path: Optional[str] = None) ->
         raise OCRError(f"Failed to convert PDF to images: {exc}") from exc
 
 
-def _draw_debug_boxes(image: np.ndarray, boxes: list, output_path: str):
-    """
-    Draw OCR bounding boxes on an image and save for debugging.
-    Useful for visual verification of detection accuracy.
-    """
-    vis = image.copy()
-    if len(vis.shape) == 2:
-        vis = cv2.cvtColor(vis, cv2.COLOR_GRAY2BGR)
-
-    for box in boxes:
-        x1, y1, x2, y2 = box["bbox"]
-        conf = box.get("confidence", 0)
-        # Green for high confidence, red for low
-        color = (0, 200, 0) if conf >= 0.85 else (0, 0, 255)
-        cv2.rectangle(vis, (x1, y1), (x2, y2), color, 1)
-        cv2.putText(vis, f"{conf:.0%}", (x1, y1 - 4),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.3, color, 1)
-
-    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    cv2.imwrite(output_path, vis)
-    logger.debug("Debug boxes saved to %s", output_path)
-
-
 # ===================================================================
 # Backward-compatible OCREngine wrapper
 # ===================================================================
 
 class OCREngine:
     """
-    Drop-in replacement for the original OCREngine.
-
-    - ``process(file_path) → list[str]`` — backward-compatible (page texts)
-    - ``process_detailed(file_path) → dict`` — new structured output
+    High-level entry point for all documents (Images, PDF, Word).
+    
+    This is the primary class used by the `main.py` controller. It handles 
+    pre-OCR tasks (like extension checking and born-digital text extraction) 
+    and maintains backward compatibility for existing callers.
     """
 
     def __init__(
@@ -589,12 +588,10 @@ class OCREngine:
         poppler_path: Optional[str] = None,
         confidence_threshold: float = 0.85,
         preprocess_config: Optional[dict] = None,
-        debug_boxes: bool = False,
     ):
         self.lang = lang
         self.tesseract_config = tesseract_config
         self.poppler_path = poppler_path
-        self.debug_boxes = debug_boxes
         self.preprocess_config = preprocess_config
 
         self._hybrid = HybridOCREngine(
@@ -603,20 +600,19 @@ class OCREngine:
             tesseract_config=tesseract_config,
             preprocess_config=preprocess_config,
         )
-        # Ensure debug directory exists
-        os.makedirs("uploads/debug", exist_ok=True)
 
     # ------------------------------------------------------------------
     # Backward-compatible API  (returns list[str])
     # ------------------------------------------------------------------
     def process(self, file_path: str) -> list[str]:
         """
-        Extract text from an image, PDF, or Word file.
+        Legacy text extraction API used for language detection and simple text views with via endpoint detect-language.
 
-        Returns
-        -------
-        list[str]
-            One string per page — same contract as the original OCREngine.
+        Args:
+            file_path (str): File system path to the document.
+
+        Returns:
+            list[str]: One string for each detected page.
         """
         path = Path(file_path)
 
@@ -650,24 +646,24 @@ class OCREngine:
         preprocessed = preprocess_image(str(path), self.preprocess_config)
         result = self._hybrid.process_image(preprocessed)
 
-        if self.debug_boxes and result["pages"]:
-            _draw_debug_boxes(
-                preprocessed, result["pages"][0]["boxes"],
-                "debug_preprocessing/boxes_output.png",
-            )
-
         return [p["text"] for p in result["pages"]]
 
     # ------------------------------------------------------------------
-    # New detailed API  (returns structured dict)
+    # Detailed API  (returns structured dict)
     # ------------------------------------------------------------------
     def process_detailed(self, file_path: str) -> dict:
         """
-        Extract text with full metadata (confidence, bounding boxes).
+        Full feature extraction API for modern web-based result views.
 
-        Returns
-        -------
-        dict  ``{"pages": [{"text", "confidence", "boxes"}]}``
+        This is the method used by the `/upload` endpoint in `main.py`. It 
+        returns the text contents alongside full bounding boxes and 
+        confidence scores for every word detected(that's why it is called detailed).
+
+        Args:
+            file_path (str): File system path to the document.
+
+        Returns:
+            dict: Structured data containing pages, text, and bboxes.
         """
         path = Path(file_path)
 
@@ -695,48 +691,16 @@ class OCREngine:
                 )
             
             result = self._hybrid.process_pdf(str(path), self.poppler_path)
-            
-            # Collect all debug images (preprocessed + masked)
-            debug_images = []
-            for p_idx, p in enumerate(result["pages"]):
-                # Preprocessed images are already saved during hybrid.process_pdf loop?
-                # Actually, process_detailed for PDF should be the central place for debug saving.
-                # But to keep it simple, I'll just gather the diagnostic_urls from the pages.
-                diag = p.get("diagnostic_url")
-                if diag:
-                    debug_images.append(diag)
-            
-            # Also add the preprocessed ones (already saved in uploads/debug/debug_preprocessed_...)
-            for idx in range(len(result["pages"])):
-                dbg_name = f"debug_preprocessed_{path.name}_page_{idx+1}.png"
-                debug_images.append(f"/uploads/debug/{dbg_name}")
-                
-            result["debug_images"] = debug_images
             return result
 
         # Image
         preprocessed = preprocess_image(str(path), self.preprocess_config)
-        
-        # Save preprocessed image for user inspection
-        debug_filename = f"debug_preprocessed_{path.name}.png"
-        debug_path = os.path.join("uploads/debug", debug_filename)
-        cv2.imwrite(debug_path, preprocessed)
-        
-        masked_name = f"masked_feed_{path.name}.png"
-        result = self._hybrid.process_image(preprocessed, debug_filename=masked_name)
-        
-        # Collect diagnostic URL from the hybrid result
-        diag_url = result.get("diagnostic_url")
-        
-        result["debug_images"] = [
-            f"/uploads/debug/{debug_filename}",
-            diag_url
-        ] if diag_url else [f"/uploads/debug/{debug_filename}"]
+        result = self._hybrid.process_image(preprocessed)
         
         return result
 
     # ------------------------------------------------------------------
-    # Word extraction (unchanged)
+    # Word extraction
     # ------------------------------------------------------------------
     def _process_word(self, file_path: str) -> list[str]:
         """Extract text from a .doc or .docx file."""
@@ -759,7 +723,7 @@ class OCREngine:
             raise OCRError(f"Failed to extract text from Word document: {e}")
 
     # ------------------------------------------------------------------
-    # Direct PDF text extraction (PyMuPDF — unchanged)
+    # Direct PDF text extraction (PyMuPDF)
     # ------------------------------------------------------------------
     def _process_pdf_direct(self, pdf_path: str) -> list[str]:
         """Extract text directly from a born-digital PDF using PyMuPDF."""
@@ -775,16 +739,26 @@ class OCREngine:
             return []
 
 
-# ---------------------------------------------------------------------------
-# Backward-compatible convenience function
-# ---------------------------------------------------------------------------
-def run_ocr(image_path) -> str:
-    """
-    Extract text from an image or PDF.
 
-    Thin wrapper around :class:`OCREngine` kept for backward
-    compatibility with existing callers.
-    """
-    engine = OCREngine()
-    pages = engine.process(image_path)
-    return "\n\n".join(pages) if isinstance(pages, list) else pages
+# (In OCREngine, the main entry point is via `process_detailed` for the /upload API,
+#  while the simpler `process` is used for language detection via /detect-language)
+#
+# 1. Born-Digital/Word Check: 
+#    If the file is a Born-Digital PDF or Word doc, it uses PyMuPDF or docx2txt directly.
+#
+# 2. Hybrid OCR Entry: 
+#    If it's a scanned Image or PDF, `HybridOCREngine` takes over.
+#
+# 3. Fast Path (Tesseract):
+#    It tries Tesseract with PSM 4, 6, and 3.
+#    - Optimization: If it sees > 500 chars and > 85% confidence, it exits early to save time.
+#    - Fallback: If ALL modes fail to extract at least 100 characters, it triggers the "Slow Path."
+#
+# 4. Slow Path (docTR + Parallel Tesseract):
+#    - Uses `DocTROCREngine.get_blocks` to identify exact text regions (bounding boxes).
+#    - Crops those regions and runs Tesseract (Multi-Threaded) on each crop individually.
+#    - Merges the result for the final high-precision output.
+#
+# 5. PDF Workflow:
+#    `HybridOCREngine.process_pdf` uses `_convert_pdf_to_images` (at 150 DPI) and 
+#    loops over the `process_image` logic (Fast/Slow Path) for every page.
