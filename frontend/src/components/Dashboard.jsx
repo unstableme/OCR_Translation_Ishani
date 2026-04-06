@@ -1,5 +1,5 @@
 import React, { useState, useRef } from 'react';
-import { Upload, FileText, Check, AlertCircle, RefreshCw, ArrowRight, Download, Info, Type } from 'lucide-react';
+import { Upload, FileText, Check, AlertCircle, RefreshCw, ArrowRight, Download, Info, Type, Camera } from 'lucide-react';
 import axios from 'axios';
 import { notoDevanagari } from '../fonts/NotoSansDevanagari';
 import { jsPDF } from 'jspdf';
@@ -121,9 +121,54 @@ const Dashboard = () => {
     const [sourceLang, setSourceLang] = useState('Tamang/Newari');
     const [targetLang, setTargetLang] = useState('Nepali');
     const [inputMode, setInputMode] = useState('file'); // 'file' | 'text'
-    const [inputText, setInputText] = useState('');
-
+    const [cameraMode, setCameraMode] = useState(false);
+    const videoRef = useRef(null);
+    const streamRef = useRef(null);
     const resultsRef = useRef(null);
+
+    const startDesktopCamera = async () => {
+        setError(null);
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ 
+                video: { width: { ideal: 1920 }, height: { ideal: 1080 } } 
+            });
+            setCameraMode(true);
+            setTimeout(() => {
+                if (videoRef.current) {
+                    videoRef.current.srcObject = stream;
+                    streamRef.current = stream;
+                }
+            }, 100);
+        } catch (err) {
+            console.error("Camera error:", err);
+            setError("Could not access webcam. Please ensure you have granted camera permissions.");
+        }
+    };
+
+    const stopDesktopCamera = () => {
+        if (streamRef.current) {
+            streamRef.current.getTracks().forEach(track => track.stop());
+            streamRef.current = null;
+        }
+        setCameraMode(false);
+    };
+
+    const captureFromDesktop = () => {
+        const video = videoRef.current;
+        if (video) {
+            const canvas = document.createElement('canvas');
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(video, 0, 0);
+            
+            canvas.toBlob((blob) => {
+                const capturedFile = new File([blob], `capture_${Date.now()}.jpg`, { type: "image/jpeg" });
+                handleFileChange({ target: { files: [capturedFile] } });
+                stopDesktopCamera();
+            }, 'image/jpeg', 0.95);
+        }
+    };
 
     const handleFileChange = (e) => {
         const selectedFile = e.target.files[0];
@@ -319,9 +364,9 @@ const Dashboard = () => {
                                         value={sourceLang} 
                                         onChange={(e) => setSourceLang(e.target.value)}
                                     >
-                                        <option value="Tamang/Newari">Auto-Detect (Himalayan)</option>
+                                        <option value="Tamang/Newari">Auto-Detect</option>
                                         <option value="Tamang">Tamang</option>
-                                        <option value="Newari">Nepal Bhasa (Newari)</option>
+                                        <option value="Newari">Newari (Nepal Bhasa)</option>
                                         <option value="Nepali">Nepali</option>
                                     </select>
                                 </div>
@@ -334,7 +379,7 @@ const Dashboard = () => {
                                     >
                                         <option value="Nepali">Nepali</option>
                                         <option value="Tamang">Tamang</option>
-                                        <option value="Nepal Bhasa">Nepal Bhasa (Newari)</option>
+                                        <option value="Nepal Bhasa">Newari (Nepal Bhasa)</option>
                                     </select>
                                 </div>
                             </div>
@@ -363,6 +408,14 @@ const Dashboard = () => {
                                         accept=".jpg,.jpeg,.png,.pdf"
                                         className="hidden-input"
                                     />
+                                    <input
+                                        id="camera-scan"
+                                        type="file"
+                                        onChange={handleFileChange}
+                                        accept="image/*"
+                                        capture="environment"
+                                        className="hidden-input"
+                                    />
                                     <div className="drop-content">
                                         {file ? (
                                             <div className="file-info">
@@ -373,9 +426,35 @@ const Dashboard = () => {
                                             </div>
                                         ) : (
                                             <>
-                                                <Upload size={48} className="upload-icon" />
-                                                <p className="upload-text">Drag & drop or browse</p>
-                                                <p className="upload-hint">Supports JPG, PNG, PDF</p>
+                                                <div className="upload-actions">
+                                                    <div className="upload-main">
+                                                        <Upload size={48} className="upload-icon" />
+                                                        <p className="upload-text">Drag & drop or browse</p>
+                                                        <p className="upload-hint">Supports JPG, PNG, PDF</p>
+                                                    </div>
+                                                    
+                                                    <div className="camera-scan-option">
+                                                        <div className="separator text-secondary">
+                                                            <span>OR</span>
+                                                        </div>
+                                                        <button 
+                                                            className="btn btn-secondary scan-btn"
+                                                            onClick={(e) => {
+                                                                e.preventDefault();
+                                                                e.stopPropagation();
+                                                                // Detection logic: Use native on mobile, custom modal on desktop
+                                                                const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+                                                                if (isMobile) {
+                                                                    document.getElementById('camera-scan').click();
+                                                                } else {
+                                                                    startDesktopCamera();
+                                                                }
+                                                            }}
+                                                        >
+                                                            <Camera size={20} /> Use Camera
+                                                        </button>
+                                                    </div>
+                                                </div>
                                                 <div className="sample-hint">
                                                     No file? Try a sample:
                                                     <span className="sample-link" onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleUseSample('Tamang_Nep.pdf'); }}> Tamang</span>
@@ -530,6 +609,33 @@ const Dashboard = () => {
                     </div>
                 </div>
             </main>
+
+            {/* Desktop Camera Modal Overlay */}
+            {cameraMode && (
+                <div className="camera-modal-overlay">
+                    <div className="camera-modal glass-panel">
+                        <div className="camera-modal-header">
+                            <h3><Camera size={20} /> Document Capture</h3>
+                            <button className="btn-close" onClick={stopDesktopCamera}>&times;</button>
+                        </div>
+                        <div className="camera-viewfinder">
+                            <video 
+                                ref={videoRef} 
+                                autoPlay 
+                                playsInline 
+                                className="webcam-feed"
+                            />
+                            <div className="scanning-guide"></div>
+                        </div>
+                        <div className="camera-modal-footer">
+                            <button className="btn btn-secondary" onClick={stopDesktopCamera}>Cancel</button>
+                            <button className="btn btn-primary capture-btn" onClick={captureFromDesktop}>
+                                <div className="shutter-icon"></div> Capture Photo
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 };

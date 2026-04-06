@@ -1,78 +1,79 @@
-# NepText: Professional OCR & Translation Suite
+# NepText: Intelligent Himalayan OCR & Translation Suite
 
-**NepText** is a high-performance system designed for extracting and translating text from documents (images and PDFs). It specializes in Himalayan languages, providing seamless conversion to Nepali using state-of-the-art AI.
+**NepText** is a premium AI-powered platform designed for high-accuracy text extraction and translation of Devanagari-based documents. It specialized in Himalayan languages including **Tamang**, **Newari (Nepal Bhasa)**, and **Nepali**.
 
 ---
 
 ## 🌟 Key Features
 
-- **Hybrid OCR Engine**: Combines Tesseract and `docTR` for high-accuracy text extraction across various document qualities.
-- **Context-Aware Translation**: Uses advanced LLM post-processing to ensure culturally accurate and grammatically correct translations.
-- **Language Detection**: Automatically identifies source languages (Nepali, Tamang, Newari, etc.) in scanned documents.
-- **Multi-Format Support**: Handles `.jpg`, `.png`, `.pdf`, and `.docx` files.
-- **Scalable Architecture**: Built with FastAPI for speed and Docker for seamless deployment.
+- **Hybrid OCR Pipeline**: High-performance text extraction using a combination of Tesseract and `docTR` for multi-stage processing.
+- **Contextual Himalayan Translation**: Advanced LLM post-processing for culturally accurate translations from Tamang and Nepal Bhasa to Nepali.
+- **Smart Camera Support**: 
+  - **Mobile**: Integrated with native OS document scanners (Auto-crop, deskew).
+  - **Desktop**: Custom in-browser webcam viewfinder with real-time scanning guides.
+- **Multi-Format Support**: Processes `.jpg`, `.png`, `.pdf` (multi-page), and `.docx`.
+- **Premium Dashboard**: Glassmorphism-inspired UI with smooth micro-animations and "Typewriter" effect results.
+- **PDF Export**: One-click generation of processed results into professional PDF documents.
 
 ---
 
 ## 🏗️ Technical Stack
 
-- **Backend**: Python 3.10+, FastAPI, SQLAlchemy, PostgreSQL.
-- **Frontend**: React (Vite), TailwindCSS, Modern UI.
-- **OCR Tools**: `pytesseract`, `python-doctr`, `OpenCV`.
-- **AI Processing**: LLM-based translation optimization.
+- **Frontend**: React 18, Vite, Lucide Icons, Vanilla CSS (Premium Glassmorphism).
+- **Backend**: Python 3.10+, FastAPI, docTR (Deep Learning OCR), Tesseract.
+- **AI Engine**: LLM-based translation optimization (OpenRouter/Gemini).
+- **Deployment**: Docker & Docker Compose ready.
 
 ---
 
-## 🚀 Quick Start
+## 🚀 Deployment & Setup
 
-### Prerequisites
-- Docker & Docker Compose
-- An AI API Key (e.g., OpenRouter)
+### 1. Configure Environment
+1. Clone the repository.
+2. Rename `.env.example` to `.env` in the root and backend directories.
+3. Add your `OPENROUTER_KEY` or relevant AI credentials.
 
-### Deployment with Docker (Recommended)
-
-1. **Configure Environment**:
-   - Rename `.env.example` to `.env` in the root directory.
-   - Add your `OPENROUTER_KEY`.
-
-2. **Run the Stack**:
-   ```bash
-   docker-compose up --build -d
-   ```
-
-3. **Access**:
-   - **Frontend**: http://localhost
-   - **API Docs**: http://localhost:8000/docs
+### 2. Run with Docker (Recommended)
+```bash
+docker-compose up --build -d
+```
+Access via:
+- **Frontend**: http://localhost
+- **Backend Docs**: http://localhost:8000/docs
 
 ---
 
-## 🛠️ Local Development (Manual)
+## 🛠️ Local Development & Mobile Testing
 
-### 1. Backend Setup
+To test the **"Use Camera"** features on actual mobile devices, you must bind the servers to your network IP.
+
+### 1. Start Backend
 ```bash
 cd backend
-python -m venv venv
-# Activate venv (Source or .\venv\Scripts\activate)
-pip install -r requirements.txt
-uvicorn main:app --reload
+# Recommended: Ensure local firewall allows port 8000
+uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-### 2. Frontend Setup
+### 2. Start Frontend
 ```bash
 cd frontend
-npm install
-npm run dev
+# Expose to network for mobile access
+npm run dev -- --host
 ```
+
+### 3. Mobile Access
+Find your laptop's **IPv4 Address** (e.g., `192.168.1.15`) via `ipconfig` and open this on your phone:
+`http://192.168.1.15:5173`
 
 ---
 
 ## 📂 Project Structure
 
 ```text
-├── backend/            # FastAPI server, OCR logic, and DB models
-├── frontend/           # React application and UI components
-├── docker-compose.yml  # Orchestration for containerized deployment
-└── .github/workflows/  # CI/CD pipelines
+├── backend/            # FastAPI, OCR processing, LLM logic
+├── frontend/           # React dashboard, Camera API, UI logic
+├── docker-compose.yml  # Container orchestration
+└── README.md           # Documentation
 ```
 
 ## 📜 License

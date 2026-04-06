@@ -156,12 +156,201 @@
 }
 
 .sample-hint {
-    margin-top: 1rem;
+    margin-top: 1.5rem;
     font-size: 0.875rem;
     color: var(--text-secondary);
-    padding: 0.5rem;
+    padding: 1rem 0.5rem 0.5rem;
     border-top: 1px solid rgba(255, 255, 255, 0.05);
     width: 100%;
+}
+
+.upload-actions {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 1.5rem;
+}
+
+.camera-scan-option {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+}
+
+.separator {
+    display: flex;
+    align-items: center;
+    margin-bottom: 1.5rem;
+    color: var(--text-secondary);
+    font-size: 0.75rem;
+    font-weight: 600;
+    width: 100%;
+}
+
+.separator::before,
+.separator::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: rgba(255, 255, 255, 0.1);
+}
+
+.separator span {
+    padding: 0 1rem;
+}
+
+.scan-btn {
+    width: 100%;
+    max-width: 240px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.75rem;
+    padding: 0.75rem 1.5rem;
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(99, 102, 241, 0.4);
+    border-radius: 2rem;
+    color: var(--text-primary);
+    font-weight: 600;
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.scan-btn:hover {
+    background: var(--primary);
+    border-color: var(--primary);
+    transform: translateY(-2px);
+    box-shadow: 0 4px 20px rgba(99, 102, 241, 0.3);
+}
+
+/* Desktop Camera Scan Styles */
+.camera-modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.85);
+    backdrop-filter: blur(8px);
+    z-index: 2000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    animation: fadeIn 0.3s ease-out;
+}
+
+.camera-modal {
+    width: 90%;
+    max-width: 800px;
+    background: var(--bg-secondary);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 1.5rem;
+    overflow: hidden;
+    position: relative;
+    box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+}
+
+.camera-modal-header {
+    padding: 1.25rem 1.5rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.camera-modal-header h3 {
+    margin: 0;
+    font-size: 1.1rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    color: white;
+}
+
+.btn-close {
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    font-size: 2rem;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0;
+    transition: color 0.2s;
+}
+
+.btn-close:hover {
+    color: white;
+}
+
+.camera-viewfinder {
+    position: relative;
+    background: #000;
+    aspect-ratio: 16 / 9;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.webcam-feed {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.scanning-guide {
+    position: absolute;
+    top: 15%;
+    left: 15%;
+    right: 15%;
+    bottom: 15%;
+    border: 2px dashed rgba(255, 255, 255, 0.3);
+    border-radius: 1rem;
+    pointer-events: none;
+}
+
+.scanning-guide::before {
+    content: '';
+    position: absolute;
+    top: -2px;
+    left: -2px;
+    right: -2px;
+    height: 2px;
+    background: var(--primary);
+    box-shadow: 0 0 15px var(--primary);
+    animation: scanLineMove 3s infinite ease-in-out;
+}
+
+@keyframes scanLineMove {
+    0%, 100% { transform: translateY(0); opacity: 0; }
+    50% { transform: translateY(300px); opacity: 1; }
+}
+
+.camera-modal-footer {
+    padding: 1.5rem;
+    display: flex;
+    justify-content: center;
+    gap: 2rem;
+    background: rgba(0, 0, 0, 0.2);
+}
+
+.capture-btn {
+    min-width: 180px;
+    height: 54px;
+    border-radius: 27px;
+    font-size: 1.1rem;
+    box-shadow: 0 4px 15px rgba(99, 102, 241, 0.4);
+}
+
+.shutter-icon {
+    width: 16px;
+    height: 16px;
+    border: 2px solid white;
+    border-radius: 50%;
+    background: transparent;
+    margin-right: 8px;
+    display: inline-block;
+    vertical-align: middle;
 }
 
 .sample-link {
@@ -640,6 +829,28 @@
     background: rgba(255, 255, 255, 0.03);
     border-radius: 0.75rem;
     border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+@media (max-width: 600px) {
+    .language-selectors {
+        gap: 0.75rem;
+        padding: 0.75rem;
+    }
+    
+    .selector-group label {
+        font-size: 0.7rem;
+    }
+    
+    .lang-select {
+        padding: 0.5rem 0.3rem;
+        font-size: 0.8rem;
+    }
+}
+
+@media (max-width: 400px) {
+    .language-selectors {
+        gap: 0.5rem;
+    }
 }
 
 .selector-group {
