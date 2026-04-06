@@ -121,6 +121,7 @@ const Dashboard = () => {
     const [sourceLang, setSourceLang] = useState('Tamang/Newari');
     const [targetLang, setTargetLang] = useState('Nepali');
     const [inputMode, setInputMode] = useState('file'); // 'file' | 'text'
+    const [inputText, setInputText] = useState('');
     const [cameraMode, setCameraMode] = useState(false);
     const videoRef = useRef(null);
     const streamRef = useRef(null);
