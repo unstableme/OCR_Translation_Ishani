@@ -1,5 +1,5 @@
-import React, { useState, useRef } from 'react';
-import { Upload, FileText, Check, AlertCircle, RefreshCw, ArrowRight, Download, Info, Type, Camera } from 'lucide-react';
+import React, { useState, useRef, useEffect } from 'react';
+import { Upload, FileText, Check, AlertCircle, RefreshCw, ArrowRight, Download, Info, Type, Camera, Mic, Square, Trash2 } from 'lucide-react';
 import axios from 'axios';
 import { notoDevanagari } from '../fonts/NotoSansDevanagari';
 import { jsPDF } from 'jspdf';
@@ -123,6 +123,23 @@ const Dashboard = () => {
     const [inputMode, setInputMode] = useState('file'); // 'file' | 'text'
     const [inputText, setInputText] = useState('');
     const [cameraMode, setCameraMode] = useState(false);
+    
+    // Audio State
+    const [isRecording, setIsRecording] = useState(false);
+    const [audioBlob, setAudioBlob] = useState(null);
+    const [recordingTime, setRecordingTime] = useState(0);
+    const mediaRecorderRef = useRef(null);
+    const audioChunksRef = useRef([]);
+    const timerRef = useRef(null);
+
+    // Live Transcription State
+    const wsRef = useRef(null);
+    const [transcript, setTranscript] = useState('');       // live + final transcript
+    const [liveStatus, setLiveStatus] = useState('idle');   // idle | connecting | live | processing | done | error
+    const [wsStatusMsg, setWsStatusMsg] = useState('');
+    const transcriptRef = useRef('');                       // mirror of transcript for WS callbacks
+    const liveViewRef = useRef(null);
+
     const videoRef = useRef(null);
     const streamRef = useRef(null);
     const resultsRef = useRef(null);
@@ -144,6 +161,155 @@ const Dashboard = () => {
             console.error("Camera error:", err);
             setError("Could not access webcam. Please ensure you have granted camera permissions.");
         }
+    };
+
+    // Audio Recording Logic — Live Transcription via WebSocket
+    const startRecording = async () => {
+        setError(null);
+        setTranscript('');
+        transcriptRef.current = '';
+        setLiveStatus('connecting');
+        setWsStatusMsg('Connecting...');
+
+        if (!window.isSecureContext && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+            setError('Microphone access requires a secure connection (HTTPS).');
+            setLiveStatus('error');
+            return;
+        }
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            setError('Your browser does not support audio recording.');
+            setLiveStatus('error');
+            return;
+        }
+
+        try {
+            // 1. Open WebSocket FIRST
+            const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${wsProtocol}//${window.location.hostname}:8000/ws/transcribe?lang=${encodeURIComponent(sourceLang)}`;
+            const ws = new WebSocket(wsUrl);
+            wsRef.current = ws;
+
+            ws.onopen = () => {
+                setLiveStatus('live');
+                setWsStatusMsg('Listening...');
+            };
+
+            ws.onmessage = (event) => {
+                try {
+                    const msg = JSON.parse(event.data);
+                    if (msg.type === 'segment' && msg.text) {
+                        // Server sends the FULL transcript so far on each chunk
+                        transcriptRef.current = msg.text;
+                        setTranscript(msg.text);
+                        setWsStatusMsg('Listening...');
+                        // Auto-scroll live view
+                        setTimeout(() => {
+                            if (liveViewRef.current) {
+                                liveViewRef.current.scrollTop = liveViewRef.current.scrollHeight;
+                            }
+                        }, 50);
+                    } else if (msg.type === 'status') {
+                        setWsStatusMsg(msg.message || '');
+                    } else if (msg.type === 'done') {
+                        setLiveStatus('done');
+                        setWsStatusMsg('Transcription complete.');
+                    } else if (msg.type === 'error') {
+                        setError(`Transcription: ${msg.message}`);
+                        setLiveStatus('error');
+                    }
+                } catch (_) { /* ignore parse errors */ }
+            };
+
+            ws.onerror = () => {
+                setError('WebSocket error. Check that the backend is running.');
+                setLiveStatus('error');
+            };
+
+            ws.onclose = () => {
+                if (liveStatus !== 'done') setLiveStatus('idle');
+            };
+
+            // 2. Start microphone
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+            // Prefer webm/opus which browsers output natively
+            const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+                ? 'audio/webm;codecs=opus'
+                : 'audio/webm';
+
+            const mediaRecorder = new MediaRecorder(stream, { mimeType });
+            mediaRecorderRef.current = mediaRecorder;
+            audioChunksRef.current = [];
+
+            // Send each timed chunk as binary over WS
+            mediaRecorder.ondataavailable = (event) => {
+                if (event.data.size > 100 && ws.readyState === WebSocket.OPEN) {
+                    audioChunksRef.current.push(event.data);
+                    event.data.arrayBuffer().then((buf) => {
+                        // Send the raw blob bytes
+                        ws.send(buf);
+                    }).catch(() => {});
+                }
+            };
+
+            mediaRecorder.onstop = () => {
+                const blob = new Blob(audioChunksRef.current, { type: mimeType });
+                setAudioBlob(blob);
+                stream.getTracks().forEach((t) => t.stop());
+                // Signal end
+                if (ws.readyState === WebSocket.OPEN) ws.send('done');
+            };
+
+            // Fire ondataavailable every 3 seconds
+            mediaRecorder.start(3000);
+            setIsRecording(true);
+            setRecordingTime(0);
+
+            timerRef.current = setInterval(() => {
+                setRecordingTime((prev) => prev + 1);
+            }, 1000);
+
+        } catch (err) {
+            console.error('Audio recording error:', err);
+            setError('Could not access microphone. Please grant microphone permissions.');
+            setLiveStatus('error');
+        }
+    };
+
+    const stopRecording = () => {
+        if (mediaRecorderRef.current && isRecording) {
+            mediaRecorderRef.current.stop();
+            setIsRecording(false);
+            clearInterval(timerRef.current);
+            setLiveStatus('done');
+        }
+    };
+
+    const clearAudio = () => {
+        // Stop recording if active
+        if (isRecording) {
+            stopRecording();
+        }
+        
+        // Close WS if open
+        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+            wsRef.current.close();
+        }
+        wsRef.current = null;
+        setIsRecording(false);
+        setAudioBlob(null);
+        setFile(null);
+        setRecordingTime(0);
+        setTranscript('');
+        transcriptRef.current = '';
+        setLiveStatus('idle');
+        setWsStatusMsg('');
+    };
+
+    const formatTime = (seconds) => {
+        const mins = Math.floor(seconds / 60);
+        const secs = seconds % 60;
+        return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
     };
 
     const stopDesktopCamera = () => {
@@ -185,6 +351,10 @@ const Dashboard = () => {
                     setPreviewUrl(reader.result);
                 };
                 reader.readAsDataURL(selectedFile);
+            } else if (selectedFile.type.startsWith('audio/')) {
+                setPreviewUrl(null);
+                setAudioBlob(selectedFile);
+                setInputMode('audio');
             } else {
                 setPreviewUrl(null);
             }
@@ -214,16 +384,42 @@ const Dashboard = () => {
     };
 
     const handleTranslate = async () => {
-        if (inputMode === 'file' && !file) {
-            setError('Please upload a document or use the sample document first.');
-            return;
-        }
-
         if (targetLang !== 'Nepali') {
             setError(`${targetLang} translation is currently unavailable. We are working on it!`);
             return;
         }
 
+        // Audio mode: translate the live transcript text
+        if (inputMode === 'audio') {
+            if (!transcript.trim()) {
+                setError('Please record audio first to get a transcript, then click Translate.');
+                return;
+            }
+            setLoading(true);
+            setError(null);
+            setResult(null);
+            try {
+                const response = await axios.post(`${API_BASE_URL}/translate`, {
+                    text: transcript,
+                    source_lang: sourceLang,
+                    target_lang: targetLang,
+                }, { timeout: 300000 });
+                response.data.extracted_text = transcript;
+                setResult(response.data);
+                setActiveTab('translated');
+            } catch (err) {
+                console.error(err);
+                setError(err.response?.data?.detail || 'Translation failed.');
+            } finally {
+                setLoading(false);
+            }
+            return;
+        }
+
+        if (inputMode === 'file' && !file) {
+            setError('Please upload a document first.');
+            return;
+        }
         if (inputMode === 'text' && !inputText.trim()) {
             setError('Please enter or paste some text to translate.');
             return;
@@ -233,7 +429,6 @@ const Dashboard = () => {
         setError(null);
         setResult(null);
 
-        // Scroll to results on mobile
         if (window.innerWidth <= 768) {
             setTimeout(() => {
                 resultsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -247,22 +442,18 @@ const Dashboard = () => {
                 formData.append('file', file);
                 formData.append('source_lang', sourceLang);
                 formData.append('target_lang', targetLang);
-
                 response = await axios.post(`${API_BASE_URL}/upload`, formData, {
-                    headers: {
-                        'Content-Type': 'multipart/form-data',
-                    },
+                    headers: { 'Content-Type': 'multipart/form-data' },
+                    timeout: 300000,
                 });
             } else {
                 response = await axios.post(`${API_BASE_URL}/translate`, {
                     text: inputText,
                     source_lang: sourceLang,
                     target_lang: targetLang,
-                });
-                // Standardize response for the UI
+                }, { timeout: 300000 });
                 response.data.extracted_text = inputText;
             }
-
             setResult(response.data);
             setActiveTab('translated');
         } catch (err) {
@@ -398,6 +589,12 @@ const Dashboard = () => {
                                 >
                                     <Type size={16} /> Text Input
                                 </button>
+                                <button
+                                    className={`mode-btn ${inputMode === 'audio' ? 'active' : ''}`}
+                                    onClick={() => setInputMode('audio')}
+                                >
+                                    <Mic size={16} /> Audio
+                                </button>
                             </div>
 
                             {inputMode === 'file' ? (
@@ -466,6 +663,105 @@ const Dashboard = () => {
                                         )}
                                     </div>
                                 </label>
+                            ) : inputMode === 'audio' ? (
+                                <div className="audio-input-container">
+                                    {/* ── Controls Row ── */}
+                                    <div className={`audio-recorder-bar ${isRecording ? 'recording' : ''}`}>
+                                        <div className="recorder-left">
+                                            <button
+                                                className={`record-btn ${isRecording ? 'stop' : 'start'}`}
+                                                onClick={isRecording ? stopRecording : startRecording}
+                                                disabled={!isRecording && liveStatus === 'connecting'}
+                                                title={isRecording ? 'Stop recording' : 'Start recording'}
+                                            >
+                                                {isRecording ? <Square size={22} /> : <Mic size={22} />}
+                                            </button>
+                                            <div className="recorder-info">
+                                                {isRecording ? (
+                                                    <>
+                                                        <span className="rec-dot" />
+                                                        <span className="rec-time">{formatTime(recordingTime)}</span>
+                                                        <span className="rec-label">Recording</span>
+                                                    </>
+                                                ) : liveStatus === 'done' ? (
+                                                    <span className="rec-done">✓ Done — edit transcript below</span>
+                                                ) : liveStatus === 'connecting' ? (
+                                                    <span className="rec-label">Connecting...</span>
+                                                ) : (
+                                                    <span className="rec-label">Click mic to start live transcription</span>
+                                                )}
+                                            </div>
+                                        </div>
+                                        <div className="recorder-right">
+                                            {(transcript || isRecording) && (
+                                                <button className="btn btn-ghost btn-sm" onClick={clearAudio} title="Clear & start over">
+                                                    <Trash2 size={15} /> Clear
+                                                </button>
+                                            )}
+                                        </div>
+                                    </div>
+
+                                    {/* ── WS status pill ── */}
+                                    {wsStatusMsg && (
+                                        <div className={`ws-status-pill ${liveStatus}`}>
+                                            {liveStatus === 'live' && <span className="ws-dot" />}
+                                            {wsStatusMsg}
+                                        </div>
+                                    )}
+
+                                    {/* ── Live transcript / editable area ── */}
+                                    {isRecording ? (
+                                        // DURING recording: read-only live view
+                                        <div className="live-transcript-view" ref={liveViewRef}>
+                                            {transcript ? (
+                                                <span className="live-transcript-text">{transcript}<span className="live-cursor">▋</span></span>
+                                            ) : (
+                                                <span className="live-placeholder">Speak now… text will appear here</span>
+                                            )}
+                                        </div>
+                                    ) : transcript ? (
+                                        // AFTER recording: editable textarea
+                                        <>
+                                            <div className="transcript-toolbar">
+                                                <span className="transcript-label">Transcript — edit before translating</span>
+                                                <div className="transcript-actions">
+                                                    <button
+                                                        className="btn btn-ghost btn-xs"
+                                                        title="Copy transcript"
+                                                        onClick={() => navigator.clipboard.writeText(transcript)}
+                                                    >
+                                                        <FileText size={14} /> Copy
+                                                    </button>
+                                                    <button
+                                                        className="btn btn-ghost btn-xs"
+                                                        title="Download as .txt"
+                                                        onClick={() => {
+                                                            const blob = new Blob([transcript], { type: 'text/plain' });
+                                                            const url = URL.createObjectURL(blob);
+                                                            const a = document.createElement('a');
+                                                            a.href = url; a.download = 'transcript.txt'; a.click();
+                                                            URL.revokeObjectURL(url);
+                                                        }}
+                                                    >
+                                                        <Download size={14} /> .txt
+                                                    </button>
+                                                </div>
+                                            </div>
+                                            <textarea
+                                                className="transcript-edit-field"
+                                                value={transcript}
+                                                onChange={(e) => { setTranscript(e.target.value); transcriptRef.current = e.target.value; }}
+                                                placeholder="Your transcript will appear here after recording..."
+                                            />
+                                        </>
+                                    ) : (
+                                        // EMPTY state
+                                        <div className="audio-empty-hint">
+                                            <Mic size={36} className="audio-empty-icon" />
+                                            <p>Press the mic button to start.<br/>Your words will appear here live as you speak.</p>
+                                        </div>
+                                    )}
+                                </div>
                             ) : (
                                 <div className="text-input-container">
                                     <textarea
@@ -495,15 +791,15 @@ const Dashboard = () => {
                             <button
                                 className="btn btn-primary w-full mt-4"
                                 onClick={handleTranslate}
-                                disabled={loading}
+                                disabled={loading || (inputMode === 'audio' && isRecording)}
                             >
                                 {loading ? (
                                     <>
-                                        <RefreshCw size={18} className="spin" /> Processing...
+                                        <RefreshCw size={18} className="spin" /> Translating...
                                     </>
                                 ) : (
                                     <>
-                                        {inputMode === 'file' ? 'Translate Document' : 'Translate Text'} <ArrowRight size={18} />
+                                        {inputMode === 'audio' ? 'Translate Transcript' : inputMode === 'file' ? 'Translate Document' : 'Translate Text'} <ArrowRight size={18} />
                                     </>
                                 )}
                             </button>
@@ -565,7 +861,7 @@ const Dashboard = () => {
                                             className={`tab ${activeTab === 'extracted' ? 'active' : ''}`}
                                             onClick={() => setActiveTab('extracted')}
                                         >
-                                            <FileText size={16} /> Original Text
+                                            <FileText size={16} /> {inputMode === 'audio' ? 'Transcript' : 'Original Text'}
                                         </button>
                                     </div>
 
@@ -590,6 +886,9 @@ const Dashboard = () => {
                                                 {result.timing.ocr_processing_seconds > 0 && (
                                                     <span className="timing-item">OCR: <strong>{result.timing.ocr_processing_seconds}s</strong></span>
                                                 )}
+                                                {result.timing.transcription_seconds > 0 && (
+                                                    <span className="timing-item">Audio: <strong>{result.timing.transcription_seconds}s</strong></span>
+                                                )}
                                                 <span className="timing-item">AI: <strong>{result.timing.llm_api_response_seconds}s</strong></span>
                                                 <span className="timing-item total">Total: <strong>{result.timing.total_processing_seconds}s</strong></span>
                                             </div>
@@ -600,8 +899,10 @@ const Dashboard = () => {
                                 <div className="empty-state">
                                     <TamangTranslationIcon size={64} className="empty-icon" />
                                     <p>
-                                        {inputMode === 'file' 
-                                            ? 'Upload a document to see the translation results here.' 
+                                        {inputMode === 'audio'
+                                            ? 'Record audio, edit the transcript, then click "Translate Transcript" to see results here.'
+                                            : inputMode === 'file'
+                                            ? 'Upload a document to see the translation results here.'
                                             : 'Enter text and click translate to see the results here.'}
                                     </p>
                                 </div>

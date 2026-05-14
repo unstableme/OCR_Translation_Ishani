@@ -49,3 +49,5 @@ backend/ocr.log
 backend/test_accuracy_results/
 backend/test_final.txt
 backend/test_result.txt
+backend/scratch/
+

@@ -961,6 +961,120 @@
     color: rgba(255, 255, 255, 0.3);
 }
 
+/* Audio Recording Area */
+.audio-input-container {
+    display: flex;
+    flex-direction: column;
+    animation: fadeIn 0.3s ease-out;
+}
+
+.audio-recorder {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 3rem 1.5rem;
+    background: rgba(255, 255, 255, 0.02);
+    border: 2px dashed var(--border);
+    border-radius: 0.75rem;
+    transition: all 0.3s;
+}
+
+.audio-recorder.recording {
+    border-color: rgba(239, 68, 68, 0.5);
+    background: rgba(239, 68, 68, 0.05);
+}
+
+.recording-status {
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin-bottom: 2rem;
+    height: 2rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.recording-status .time {
+    color: #ef4444;
+    font-family: monospace;
+    font-size: 1.5rem;
+    letter-spacing: 2px;
+}
+
+.record-btn {
+    width: 80px;
+    height: 80px;
+    border-radius: 50%;
+    border: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    color: white;
+    margin-bottom: 1rem;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+}
+
+.record-btn.start {
+    background: linear-gradient(135deg, var(--primary), var(--accent));
+}
+
+.record-btn.start:hover {
+    transform: scale(1.05);
+    box-shadow: 0 8px 25px rgba(99, 102, 241, 0.4);
+}
+
+.record-btn.stop {
+    background: #ef4444;
+    animation: pulse 2s infinite;
+}
+
+.record-btn.stop:hover {
+    background: #dc2626;
+    transform: scale(1.05);
+}
+
+.record-hint {
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+    margin-bottom: 2rem;
+}
+
+.upload-audio-btn {
+    margin-top: 1rem;
+    width: 100%;
+    max-width: 240px;
+}
+
+.audio-player-container {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+    align-items: center;
+}
+
+.audio-actions {
+    display: flex;
+    justify-content: center;
+    width: 100%;
+}
+
+@keyframes pulse {
+    0% {
+        box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7);
+    }
+    70% {
+        box-shadow: 0 0 0 20px rgba(239, 68, 68, 0);
+    }
+    100% {
+        box-shadow: 0 0 0 0 rgba(239, 68, 68, 0);
+    }
+}
+
+
 .input-footer {
     display: flex;
     justify-content: space-between;
@@ -1111,4 +1225,289 @@
         opacity: 1;
         transform: translateY(0);
     }
+}
+
+/* ─────────────────────────────────────────────────────────
+   Live Dictation / Audio Mode Styles
+   ───────────────────────────────────────────────────────── */
+
+/* Horizontal recorder control bar */
+.audio-recorder-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.75rem 1rem;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 0.75rem;
+    margin-bottom: 0.75rem;
+    transition: all 0.3s;
+}
+
+.audio-recorder-bar.recording {
+    background: rgba(239, 68, 68, 0.06);
+    border-color: rgba(239, 68, 68, 0.3);
+}
+
+.recorder-left {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+}
+
+.recorder-right {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.recorder-info {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+/* Pulsing red dot shown while recording */
+.rec-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #ef4444;
+    animation: pulse 1.5s ease-in-out infinite;
+    flex-shrink: 0;
+}
+
+.rec-time {
+    font-family: 'Courier New', monospace;
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: #ef4444;
+    letter-spacing: 2px;
+}
+
+.rec-label {
+    font-size: 0.875rem;
+    color: var(--text-secondary);
+}
+
+.rec-done {
+    font-size: 0.875rem;
+    color: var(--success);
+    font-weight: 600;
+}
+
+/* record-btn override: smaller in bar context */
+.audio-recorder-bar .record-btn {
+    width: 52px;
+    height: 52px;
+    border-radius: 50%;
+    border: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    color: white;
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+    flex-shrink: 0;
+}
+
+.audio-recorder-bar .record-btn.start {
+    background: linear-gradient(135deg, var(--primary), var(--accent));
+}
+
+.audio-recorder-bar .record-btn.start:hover {
+    transform: scale(1.08);
+    box-shadow: 0 6px 20px rgba(99, 102, 241, 0.45);
+}
+
+.audio-recorder-bar .record-btn.stop {
+    background: #ef4444;
+    animation: pulse 2s infinite;
+}
+
+.audio-recorder-bar .record-btn.stop:hover {
+    background: #dc2626;
+    transform: scale(1.05);
+}
+
+.audio-recorder-bar .record-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    transform: none;
+}
+
+/* WebSocket status pill */
+.ws-status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.3rem 0.9rem;
+    border-radius: 2rem;
+    font-size: 0.78rem;
+    font-weight: 600;
+    margin-bottom: 0.75rem;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    color: var(--text-secondary);
+    transition: all 0.3s;
+}
+
+.ws-status-pill.live {
+    background: rgba(16, 185, 129, 0.1);
+    border-color: rgba(16, 185, 129, 0.3);
+    color: #6ee7b7;
+}
+
+.ws-status-pill.error {
+    background: rgba(239, 68, 68, 0.1);
+    border-color: rgba(239, 68, 68, 0.3);
+    color: #fca5a5;
+}
+
+.ws-status-pill.done {
+    background: rgba(99, 102, 241, 0.1);
+    border-color: rgba(99, 102, 241, 0.25);
+    color: #a5b4fc;
+}
+
+/* Green pulsing dot inside pill when live */
+.ws-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #10b981;
+    animation: pulse 1.5s ease-in-out infinite;
+    flex-shrink: 0;
+}
+
+/* ── Live Transcript View (read-only during recording) ── */
+.live-transcript-view {
+    min-height: 180px;
+    max-height: 300px;
+    overflow-y: auto;
+    background: rgba(99, 102, 241, 0.05);
+    border: 1px solid rgba(99, 102, 241, 0.2);
+    border-radius: 0.75rem;
+    padding: 1.25rem;
+    font-size: 1rem;
+    line-height: 1.75;
+    color: var(--text-primary);
+    word-break: break-word;
+    transition: all 0.3s;
+    /* Subtle inner glow while recording */
+    box-shadow: inset 0 0 30px rgba(99, 102, 241, 0.04);
+}
+
+.live-transcript-text {
+    white-space: pre-wrap;
+}
+
+/* Blinking block cursor shown at end of live text */
+.live-cursor {
+    display: inline-block;
+    color: var(--primary);
+    animation: blink 0.9s step-end infinite;
+    font-weight: 400;
+    margin-left: 2px;
+}
+
+.live-placeholder {
+    color: rgba(255, 255, 255, 0.25);
+    font-style: italic;
+}
+
+/* ── Transcript Toolbar (shown after recording stops) ── */
+.transcript-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.5rem;
+}
+
+.transcript-label {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.transcript-actions {
+    display: flex;
+    gap: 0.4rem;
+}
+
+/* ── Editable transcript textarea ── */
+.transcript-edit-field {
+    width: 100%;
+    min-height: 180px;
+    max-height: 340px;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--border);
+    border-radius: 0.75rem;
+    padding: 1.25rem;
+    color: var(--text-primary);
+    font-size: 1rem;
+    font-family: inherit;
+    line-height: 1.75;
+    resize: vertical;
+    transition: all 0.2s;
+    outline: none;
+    box-sizing: border-box;
+}
+
+.transcript-edit-field:focus {
+    border-color: var(--primary);
+    background: rgba(255, 255, 255, 0.05);
+    box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.12);
+}
+
+.transcript-edit-field::placeholder {
+    color: rgba(255, 255, 255, 0.2);
+    font-style: italic;
+}
+
+/* ── Empty audio state ── */
+.audio-empty-hint {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 180px;
+    text-align: center;
+    color: var(--text-secondary);
+    gap: 1rem;
+    opacity: 0.6;
+}
+
+.audio-empty-icon {
+    color: var(--primary);
+    opacity: 0.5;
+}
+
+.audio-empty-hint p {
+    font-size: 0.9rem;
+    line-height: 1.6;
+    margin: 0;
+}
+
+/* ── Ghost button ── */
+.btn-ghost {
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    color: var(--text-secondary);
+    transition: all 0.2s;
+}
+
+.btn-ghost:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: var(--text-primary);
+    border-color: rgba(255, 255, 255, 0.2);
+}
+
+.btn-xs {
+    padding: 0.3rem 0.7rem;
+    font-size: 0.78rem;
+    border-radius: 0.4rem;
 }

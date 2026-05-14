@@ -34,3 +34,15 @@ class Translation(Base):
     model_used = Column(String)
     created_at = Column(DateTime, default=func.now())
     status = Column(String, default="Completed")
+
+
+class AudioTranscription(Base):
+    __tablename__ = "audio_transcriptions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    document_id = Column(UUID(as_uuid=True), ForeignKey("documents.id"))
+    transcribed_text = Column(Text)
+    language_detected = Column(String)
+    audio_duration = Column(Float)
+    created_at = Column(DateTime, default=func.now())
+    status = Column(String, default="Transcribed")
