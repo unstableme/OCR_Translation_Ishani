@@ -4,7 +4,7 @@ from pathlib import Path
 from dotenv import load_dotenv, find_dotenv
 
 # Load environment variables at the very beginning
-load_dotenv(find_dotenv(), override=False)
+load_dotenv(find_dotenv(), override=True)
 
 # Configure logging early to catch initialization logs
 logging.basicConfig(
@@ -670,4 +670,4 @@ async def ws_live_transcribe(websocket: WebSocket):
             except Exception:
                 pass
     finally:
-        logger.info("WS /ws/transcribe: connection closed")
+        logger.info("WS /ws/transcribe: connection closed")

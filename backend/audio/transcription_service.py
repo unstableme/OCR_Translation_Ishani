@@ -16,10 +16,12 @@ import logging
 import tempfile
 import time
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Dict, Any
 
-# Suppress duplicate-OpenMP-library crash (Intel + LLVM both loaded)
+# Suppress duplicate-OpenMP-library crash and force thread counts
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+os.environ["OMP_NUM_THREADS"] = "4"
+os.environ["MKL_NUM_THREADS"] = "4"
 # Force faster-whisper's internal huggingface_hub to use local cache ONLY — no network calls
 os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
@@ -88,10 +90,12 @@ class TranscriptionService:
         if self._local_model is not None:
             return
         from faster_whisper import WhisperModel
-        logger.info("Loading faster-whisper model '%s' on %s...", self.model_size, self.device)
+        threads = os.cpu_count() or 4
+        logger.info("Loading faster-whisper model '%s' on %s with %d threads...", self.model_size, self.device, threads)
         self._local_model = WhisperModel(
             self.model_size, device=self.device, compute_type=self.compute_type,
-            cpu_threads=1, num_workers=1,
+            cpu_threads=threads,
+            num_workers=1,
         )
 
     def _normalize_audio(self, audio_path: str) -> str:
