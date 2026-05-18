@@ -66,7 +66,6 @@ Base.metadata.create_all(bind=engine)
 ocr_engine = OCREngine()
 
 # Shared Transcription engine instance (lazy-loads Whisper model on first call)
-# Shared Transcription engine instance (lazy-loads Whisper model on first call)
 model_size = os.getenv("WHISPER_MODEL", "tiny")
 transcription_engine = TranscriptionService(model_size=model_size)
 
