@@ -31,6 +31,3 @@ python-doctr[torch]
 # Audio Processing & Transcription
 faster-whisper
 pydub
-transformers
-accelerate
-librosa
