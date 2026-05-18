@@ -22,11 +22,8 @@ pymupdf
 python-docx
 docx2txt
 
-# Machine Learning - FORCING CPU TO REDUCE IMAGE SIZE 
---extra-index-url https://download.pytorch.org/whl/cpu
-torch
-torchvision
-python-doctr[torch]
+# Machine Learning - docTR layout engine
+python-doctr
 
 # Audio Processing & Transcription
 faster-whisper
