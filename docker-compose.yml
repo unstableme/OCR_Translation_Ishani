@@ -45,6 +45,7 @@ services:
 
     volumes:
       - ./uploads:/app/uploads
+      - cache_data:/root/.cache
     ports:
       - "8000:8000"
     env_file:
@@ -68,3 +69,4 @@ services:
 
 volumes:
   postgres_data:
+  cache_data:

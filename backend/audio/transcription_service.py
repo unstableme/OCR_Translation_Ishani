@@ -22,8 +22,10 @@ from typing import Dict, Any
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 os.environ["OMP_NUM_THREADS"] = "4"
 os.environ["MKL_NUM_THREADS"] = "4"
-# Force faster-whisper's internal huggingface_hub to use local cache ONLY — no network calls
-os.environ["HF_HUB_OFFLINE"] = "1"
+# Force faster-whisper's internal huggingface_hub to use local cache ONLY by default.
+# Respect the HF_HUB_OFFLINE environment variable if set (e.g. set to '0' in .env for first-time downloads).
+if "HF_HUB_OFFLINE" not in os.environ:
+    os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 
 logger = logging.getLogger(__name__)
