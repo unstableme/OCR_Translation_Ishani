@@ -17,6 +17,7 @@ RUN apt-get update && apt-get install -y \
     tesseract-ocr-nep \
     libtesseract-dev \
     poppler-utils \
+    ffmpeg \
     libgl1 \
     libglib2.0-0 \
     libpq-dev \
