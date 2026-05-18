@@ -32,7 +32,6 @@ RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt && \
     # 3. Aggressive cleanup of massive and unused PyTorch & package assets
     rm -rf /usr/local/lib/python3.10/site-packages/torch/include && \
-    rm -rf /usr/local/lib/python3.10/site-packages/torch/bin && \
     rm -rf /usr/local/lib/python3.10/site-packages/torch/test && \
     rm -rf /usr/local/lib/python3.10/site-packages/functorch && \
     find /usr/local/lib/python3.10/site-packages/ -name "tests" -type d -exec rm -rf {} + && \
