@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Upload, FileText, Check, AlertCircle, RefreshCw, ArrowRight, Download, Info, Type, Camera, Mic, Square, Trash2 } from 'lucide-react';
+import { Upload, FileText, Check, AlertCircle, RefreshCw, ArrowRight, Download, Info, Type, Camera, Mic, Square, Trash2, Volume2, VolumeX } from 'lucide-react';
 import axios from 'axios';
 import { notoDevanagari } from '../fonts/NotoSansDevanagari';
 import { jsPDF } from 'jspdf';
@@ -124,6 +124,9 @@ const Dashboard = () => {
     const [inputText, setInputText] = useState('');
     const [cameraMode, setCameraMode] = useState(false);
     
+    // Speech Synthesis State
+    const [isReading, setIsReading] = useState(false);
+
     // Audio State
     const [isRecording, setIsRecording] = useState(false);
     const [audioBlob, setAudioBlob] = useState(null);
@@ -143,6 +146,52 @@ const Dashboard = () => {
     const videoRef = useRef(null);
     const streamRef = useRef(null);
     const resultsRef = useRef(null);
+
+    useEffect(() => {
+        return () => {
+            if (window.speechSynthesis) {
+                window.speechSynthesis.cancel();
+            }
+        };
+    }, []);
+
+    const handleReadAloud = () => {
+        if (!result) return;
+        
+        if (isReading) {
+            window.speechSynthesis.cancel();
+            setIsReading(false);
+            return;
+        }
+
+        const text = activeTab === 'translated' 
+            ? result.translated_text 
+            : result.extracted_text;
+
+        if (!text) return;
+
+        const utterance = new SpeechSynthesisUtterance(text);
+        
+        // Try to set Nepali/Hindi voice for Devanagari script
+        const voices = window.speechSynthesis.getVoices();
+        const nepaliVoice = voices.find(voice => voice.lang.includes('ne') || voice.lang.includes('NE'));
+        if (nepaliVoice) {
+            utterance.voice = nepaliVoice;
+        } else {
+            const hindiVoice = voices.find(voice => voice.lang.includes('hi') || voice.lang.includes('HI'));
+            if (hindiVoice) {
+                utterance.voice = hindiVoice;
+            }
+        }
+        
+        utterance.lang = activeTab === 'translated' && targetLang === 'Nepali' ? 'ne-NP' : 'hi-IN'; 
+        
+        utterance.onstart = () => setIsReading(true);
+        utterance.onend = () => setIsReading(false);
+        utterance.onerror = () => setIsReading(false);
+
+        window.speechSynthesis.speak(utterance);
+    };
 
     const startDesktopCamera = async () => {
         setError(null);
@@ -834,6 +883,15 @@ const Dashboard = () => {
                             <h2><FileText size={20} /> Results</h2>
                             {result && (
                                 <div className="header-actions">
+                                    <button
+                                        className={`btn ${isReading ? 'btn-secondary' : 'btn-primary'} btn-sm`}
+                                        onClick={handleReadAloud}
+                                        title={isReading ? "Stop Reading" : "Read Aloud"}
+                                        style={{ marginRight: '8px' }}
+                                    >
+                                        {isReading ? <VolumeX size={16} /> : <Volume2 size={16} />} 
+                                        {isReading ? " Stop" : " Read Aloud"}
+                                    </button>
                                     <button
                                         className="btn btn-primary btn-sm"
                                         onClick={handleDownloadPDF}

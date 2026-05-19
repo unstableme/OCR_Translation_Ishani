@@ -621,28 +621,38 @@ async def ws_live_transcribe(websocket: WebSocket):
                     )
                     full_text = result["transcribed_text"]
 
-                    if full_text:
-                        await websocket.send_text(json.dumps({
-                            "type": "segment",
-                            "text": full_text,
-                            "chunk_index": chunk_index,
-                            "is_final": False,
-                        }))
-                        logger.info(
-                            "WS chunk %d transcribed: %d chars", chunk_index, len(full_text)
-                        )
+                    if websocket.client_state == WebSocketState.CONNECTED:
+                        if full_text:
+                            await websocket.send_text(json.dumps({
+                                "type": "segment",
+                                "text": full_text,
+                                "chunk_index": chunk_index,
+                                "is_final": False,
+                            }))
+                            logger.info(
+                                "WS chunk %d transcribed: %d chars", chunk_index, len(full_text)
+                            )
+                        else:
+                            await websocket.send_text(json.dumps({
+                                "type": "status",
+                                "message": "No speech detected in this chunk yet..."
+                            }))
                     else:
-                        await websocket.send_text(json.dumps({
-                            "type": "status",
-                            "message": "No speech detected in this chunk yet..."
-                        }))
+                        logger.warning("WS client disconnected during transcription — skipping send")
+                        break
 
                 except Exception as exc:
                     logger.error("WS transcription chunk error: %s", exc)
-                    await websocket.send_text(json.dumps({
-                        "type": "error",
-                        "message": f"Transcription error: {str(exc)}"
-                    }))
+                    if websocket.client_state == WebSocketState.CONNECTED:
+                        try:
+                            await websocket.send_text(json.dumps({
+                                "type": "error",
+                                "message": f"Transcription error: {str(exc)}"
+                            }))
+                        except Exception:
+                            pass
+                    else:
+                        break
                 finally:
                     # Clean up temp files
                     if tmp_webm and os.path.exists(tmp_webm):
@@ -659,14 +669,17 @@ async def ws_live_transcribe(websocket: WebSocket):
     except WebSocketDisconnect:
         logger.info("WS /ws/transcribe: WebSocketDisconnect")
     except Exception as e:
-        logger.error("WS /ws/transcribe unexpected error: %s", e)
-        if websocket.client_state == WebSocketState.CONNECTED:
-            try:
-                await websocket.send_text(json.dumps({
-                    "type": "error",
-                    "message": str(e)
-                }))
-            except Exception:
-                pass
+        if "once a close message has been sent" in str(e):
+            logger.info("WS /ws/transcribe: connection was closed by the client during processing")
+        else:
+            logger.error("WS /ws/transcribe unexpected error: %s", e)
+            if websocket.client_state == WebSocketState.CONNECTED:
+                try:
+                    await websocket.send_text(json.dumps({
+                        "type": "error",
+                        "message": str(e)
+                    }))
+                except Exception:
+                    pass
     finally:
         logger.info("WS /ws/transcribe: connection closed")
