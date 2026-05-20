@@ -59,7 +59,7 @@ app.add_middleware(
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
 # Create database tables on startup
-Base.metadata.create_all(bind=engine)
+#Base.metadata.create_all(bind=engine)
 
 
 # Shared OCR engine instance (now uses Hybrid under the hood)
