@@ -1381,6 +1381,45 @@
     flex-shrink: 0;
 }
 
+/* Provider badge/tag styles */
+.provider-tag {
+    display: inline-flex;
+    align-items: center;
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 0.1rem 0.5rem;
+    border-radius: 4px;
+    margin-right: 0.5rem;
+    font-family: 'Outfit', sans-serif;
+    transition: all 0.3s ease;
+}
+
+.provider-tag.prov-native {
+    background: rgba(16, 185, 129, 0.15);
+    border: 1px solid rgba(16, 185, 129, 0.3);
+    color: #10b981;
+}
+
+.provider-tag.prov-groq {
+    background: rgba(99, 102, 241, 0.15);
+    border: 1px solid rgba(99, 102, 241, 0.3);
+    color: #818cf8;
+}
+
+.provider-tag.prov-deepgram {
+    background: rgba(236, 72, 153, 0.15);
+    border: 1px solid rgba(236, 72, 153, 0.3);
+    color: #f472b6;
+}
+
+.provider-tag.prov-local {
+    background: rgba(245, 158, 11, 0.15);
+    border: 1px solid rgba(245, 158, 11, 0.3);
+    color: #fbbf24;
+}
+
 /* ── Live Transcript View (read-only during recording) ── */
 .live-transcript-view {
     min-height: 180px;

@@ -478,6 +478,7 @@ async def upload_audio(
 async def transcribe_audio_only(
     file: UploadFile = File(...),
     source_lang: str = Form("Nepali"),
+    force_model: str = Form(None),
 ):
     """
     Transcribe an audio file WITHOUT translation.
@@ -507,7 +508,7 @@ async def transcribe_audio_only(
             f.write(file_content)
 
         result = transcription_engine.transcribe(
-            file_path, source_language=source_lang
+            file_path, source_language=source_lang, force_model=force_model
         )
 
         duration = time.time() - t0
@@ -557,6 +558,8 @@ async def ws_live_transcribe(websocket: WebSocket):
 
     # Pull language hint from query param (e.g. ?lang=Nepali)
     source_language = websocket.query_params.get("lang", "Nepali")
+    # Pull optional forced model parameter (e.g. ?model=groq/whisper-large-v3)
+    force_model = websocket.query_params.get("model", None)
 
     chunk_index = 0
     audio_chunks: list[bytes] = []   # accumulate all audio for the session
@@ -564,7 +567,8 @@ async def ws_live_transcribe(websocket: WebSocket):
     try:
         # Pre-load local whisper model in a background thread
         # so it doesn't block the event loop and kill the WebSocket
-        if hasattr(transcription_engine, '_load_local_model'):
+        # Only pre-load if we are in auto mode or local model is explicitly forced
+        if (force_model is None or force_model == "local") and hasattr(transcription_engine, '_load_local_model'):
             await asyncio.to_thread(transcription_engine._load_local_model)
         
         while True:
@@ -617,9 +621,13 @@ async def ws_live_transcribe(websocket: WebSocket):
                     # Run transcription in a background thread so the event loop
                     # stays alive for WebSocket heartbeats and message handling
                     result = await asyncio.to_thread(
-                        transcription_engine.transcribe, tmp_webm, source_language
+                        transcription_engine.transcribe,
+                        tmp_webm,
+                        source_language,
+                        force_model=force_model,
                     )
                     full_text = result["transcribed_text"]
+                    model_used = result.get("model_used")
 
                     if websocket.client_state == WebSocketState.CONNECTED:
                         if full_text:
@@ -628,9 +636,10 @@ async def ws_live_transcribe(websocket: WebSocket):
                                 "text": full_text,
                                 "chunk_index": chunk_index,
                                 "is_final": False,
+                                "model_used": model_used,
                             }))
                             logger.info(
-                                "WS chunk %d transcribed: %d chars", chunk_index, len(full_text)
+                                "WS chunk %d transcribed: %d chars (%s)", chunk_index, len(full_text), model_used
                             )
                         else:
                             await websocket.send_text(json.dumps({

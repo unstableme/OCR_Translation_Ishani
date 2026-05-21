@@ -138,10 +138,19 @@ const Dashboard = () => {
     // Live Transcription State
     const wsRef = useRef(null);
     const [transcript, setTranscript] = useState('');       // live + final transcript
+    const [copied, setCopied] = useState(false);
+    const [selectedEngine, setSelectedEngine] = useState('auto'); // 'auto' | 'native' | 'groq/whisper-large-v3' | 'groq/whisper-large-v3-turbo' | 'deepgram' | 'local'
     const [liveStatus, setLiveStatus] = useState('idle');   // idle | connecting | live | processing | done | error
     const [wsStatusMsg, setWsStatusMsg] = useState('');
     const transcriptRef = useRef('');                       // mirror of transcript for WS callbacks
     const liveViewRef = useRef(null);
+
+    // Browser-Native Speech Recognition State
+    const [activeProvider, setActiveProvider] = useState(''); // e.g., 'Chrome Native', 'Groq Whisper'
+    const recognitionRef = useRef(null);
+    const isNativeRef = useRef(false);
+    const isRecordingRef = useRef(false);
+    const fallbackCalledRef = useRef(false);
 
     const videoRef = useRef(null);
     const streamRef = useRef(null);
@@ -151,6 +160,9 @@ const Dashboard = () => {
         return () => {
             if (window.speechSynthesis) {
                 window.speechSynthesis.cancel();
+            }
+            if (recognitionRef.current) {
+                recognitionRef.current.abort();
             }
         };
     }, []);
@@ -212,27 +224,64 @@ const Dashboard = () => {
         }
     };
 
-    // Audio Recording Logic — Live Transcription via WebSocket
-    const startRecording = async () => {
-        setError(null);
-        setTranscript('');
-        transcriptRef.current = '';
-        setLiveStatus('connecting');
-        setWsStatusMsg('Connecting...');
+    const getBrowserNativeName = () => {
+        const userAgent = navigator.userAgent;
+        if (userAgent.indexOf("Edg") > -1) {
+            return "Edge Native Speech";
+        } else if (userAgent.indexOf("Chrome") > -1) {
+            return "Chrome Native Speech";
+        } else if (userAgent.indexOf("Safari") > -1 && userAgent.indexOf("Chrome") === -1) {
+            return "Safari Native Speech";
+        }
+        return "Browser Native Speech";
+    };
 
-        if (!window.isSecureContext && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
-            setError('Microphone access requires a secure connection (HTTPS).');
-            setLiveStatus('error');
-            return;
+    const getCleanProviderName = (modelStr) => {
+        if (!modelStr) return 'Cloud AI';
+        if (modelStr.includes('groq')) {
+            const part = modelStr.split('/').pop();
+            return `Groq Whisper (${part})`;
         }
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-            setError('Your browser does not support audio recording.');
-            setLiveStatus('error');
-            return;
+        if (modelStr.includes('deepgram')) {
+            return 'Deepgram Whisper';
         }
+        if (modelStr.includes('local')) {
+            return 'Local Offline Whisper';
+        }
+        return modelStr;
+    };
+
+    const getProviderClass = () => {
+        if (!activeProvider) return '';
+        const prov = activeProvider.toLowerCase();
+        if (prov.includes('native')) return 'prov-native';
+        if (prov.includes('groq')) return 'prov-groq';
+        if (prov.includes('deepgram')) return 'prov-deepgram';
+        if (prov.includes('local')) return 'prov-local';
+        return '';
+    };
+
+    const fallbackToWebSocket = async () => {
+        if (fallbackCalledRef.current) return;
+        fallbackCalledRef.current = true;
+        isNativeRef.current = false;
+
+        console.log("SpeechRecognition fallback triggered: switching to WebSocket...");
+
+        if (recognitionRef.current) {
+            try {
+                recognitionRef.current.abort();
+            } catch (e) {
+                console.error("Error aborting native speech recognition:", e);
+            }
+            recognitionRef.current = null;
+        }
+
+        setLiveStatus('connecting');
+        setWsStatusMsg('Switching to Cloud AI...');
+        setActiveProvider('Groq Whisper (Cloud Fallback)');
 
         try {
-            // 1. Open WebSocket FIRST
             const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             const wsUrl = `${wsProtocol}//${window.location.hostname}:8000/ws/transcribe?lang=${encodeURIComponent(sourceLang)}`;
             const ws = new WebSocket(wsUrl);
@@ -240,18 +289,34 @@ const Dashboard = () => {
 
             ws.onopen = () => {
                 setLiveStatus('live');
-                setWsStatusMsg('Listening...');
+                setWsStatusMsg('Listening (Cloud Fallback)...');
+
+                // Immediately send all pre-recorded audio chunks accumulated in background MediaRecorder
+                if (audioChunksRef.current && audioChunksRef.current.length > 0) {
+                    audioChunksRef.current.forEach((chunk) => {
+                        if (chunk.size > 100) {
+                            chunk.arrayBuffer().then((buf) => {
+                                if (ws.readyState === WebSocket.OPEN) {
+                                    ws.send(buf);
+                                }
+                            }).catch((err) => {
+                                console.error("Error processing chunk buffer:", err);
+                            });
+                        }
+                    });
+                }
             };
 
             ws.onmessage = (event) => {
                 try {
                     const msg = JSON.parse(event.data);
                     if (msg.type === 'segment' && msg.text) {
-                        // Server sends the FULL transcript so far on each chunk
                         transcriptRef.current = msg.text;
                         setTranscript(msg.text);
-                        setWsStatusMsg('Listening...');
-                        // Auto-scroll live view
+                        setWsStatusMsg('Listening (Cloud Fallback)...');
+                        if (msg.model_used) {
+                            setActiveProvider(getCleanProviderName(msg.model_used));
+                        }
                         setTimeout(() => {
                             if (liveViewRef.current) {
                                 liveViewRef.current.scrollTop = liveViewRef.current.scrollHeight;
@@ -263,25 +328,60 @@ const Dashboard = () => {
                         setLiveStatus('done');
                         setWsStatusMsg('Transcription complete.');
                     } else if (msg.type === 'error') {
-                        setError(`Transcription: ${msg.message}`);
+                        setError(`Transcription Fallback Error: ${msg.message}`);
                         setLiveStatus('error');
                     }
-                } catch (_) { /* ignore parse errors */ }
+                } catch (_) {}
             };
 
             ws.onerror = () => {
-                setError('WebSocket error. Check that the backend is running.');
-                setLiveStatus('error');
+                setError('WebSocket error. Falling back to local offline Whisper on stop.');
+                setLiveStatus('live');
+                setWsStatusMsg('Recording locally...');
+                setActiveProvider('Local Recording');
             };
 
             ws.onclose = () => {
-                if (liveStatus !== 'done') setLiveStatus('idle');
+                // Keep current done state or idle if appropriate
             };
 
-            // 2. Start microphone
+        } catch (err) {
+            console.error('WebSocket connection error:', err);
+            setError('Could not connect to Cloud transcription. Recording audio locally...');
+            setLiveStatus('live');
+            setWsStatusMsg('Recording locally...');
+            setActiveProvider('Local Recording');
+        }
+    };
+
+    // Audio Recording Logic — Browser Native Speech Recognition with Progressive Fallbacks
+    const startRecording = async () => {
+        setError(null);
+        setTranscript('');
+        transcriptRef.current = '';
+        setLiveStatus('connecting');
+        setWsStatusMsg('Initializing...');
+        
+        isRecordingRef.current = true;
+        fallbackCalledRef.current = false;
+
+        if (!window.isSecureContext && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+            setError('Microphone access requires a secure connection (HTTPS).');
+            setLiveStatus('error');
+            isRecordingRef.current = false;
+            return;
+        }
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            setError('Your browser does not support audio recording.');
+            setLiveStatus('error');
+            isRecordingRef.current = false;
+            return;
+        }
+
+        try {
+            // 1. Start microphone stream for MediaRecorder background recording
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
-            // Prefer webm/opus which browsers output natively
             const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
                 ? 'audio/webm;codecs=opus'
                 : 'audio/webm';
@@ -290,51 +390,264 @@ const Dashboard = () => {
             mediaRecorderRef.current = mediaRecorder;
             audioChunksRef.current = [];
 
-            // Send each timed chunk as binary over WS
-            mediaRecorder.ondataavailable = (event) => {
-                if (event.data.size > 100 && ws.readyState === WebSocket.OPEN) {
-                    audioChunksRef.current.push(event.data);
-                    event.data.arrayBuffer().then((buf) => {
-                        // Send the raw blob bytes
-                        ws.send(buf);
-                    }).catch(() => {});
-                }
-            };
-
-            mediaRecorder.onstop = () => {
-                const blob = new Blob(audioChunksRef.current, { type: mimeType });
-                setAudioBlob(blob);
-                stream.getTracks().forEach((t) => t.stop());
-                // Signal end
-                if (ws.readyState === WebSocket.OPEN) ws.send('done');
-            };
-
-            // Fire ondataavailable every 3 seconds
-            mediaRecorder.start(3000);
-            setIsRecording(true);
+            // Update timer
             setRecordingTime(0);
-
             timerRef.current = setInterval(() => {
                 setRecordingTime((prev) => prev + 1);
             }, 1000);
+
+            setIsRecording(true);
+
+            // 2. Determine if SpeechRecognition is supported
+            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            const useNative = selectedEngine === 'native' || (selectedEngine === 'auto' && SpeechRecognition);
+
+            if (selectedEngine === 'native' && !SpeechRecognition) {
+                setError('Browser Native Speech Recognition is not supported in this browser.');
+                setLiveStatus('error');
+                isRecordingRef.current = false;
+                stream.getTracks().forEach((t) => t.stop());
+                clearInterval(timerRef.current);
+                setIsRecording(false);
+                return;
+            }
+
+            if (useNative && SpeechRecognition) {
+                // Try Browser Native Speech Recognition
+                isNativeRef.current = true;
+                setActiveProvider(getBrowserNativeName());
+                setLiveStatus('live');
+                setWsStatusMsg('Listening...');
+
+                const rec = new SpeechRecognition();
+                rec.continuous = true;
+                rec.interimResults = true;
+
+                // Map languages: Tamang/Newari/Nepali -> ne-NP (Nepali), Hindi -> hi-IN, English -> en-US
+                let langCode = 'ne-NP';
+                const lowerSrc = sourceLang.toLowerCase();
+                if (lowerSrc === 'hindi') langCode = 'hi-IN';
+                else if (lowerSrc === 'english') langCode = 'en-US';
+                rec.lang = langCode;
+
+                let finalTranscript = '';
+                rec.onresult = (event) => {
+                    let interimTranscript = '';
+                    for (let i = event.resultIndex; i < event.results.length; ++i) {
+                        if (event.results[i].isFinal) {
+                            finalTranscript += event.results[i][0].transcript + ' ';
+                        } else {
+                            interimTranscript += event.results[i][0].transcript;
+                        }
+                    }
+                    const currentText = (finalTranscript + interimTranscript).trim();
+                    if (currentText) {
+                        setTranscript(currentText);
+                        transcriptRef.current = currentText;
+                        setTimeout(() => {
+                            if (liveViewRef.current) {
+                                liveViewRef.current.scrollTop = liveViewRef.current.scrollHeight;
+                            }
+                        }, 50);
+                    }
+                };
+
+                rec.onerror = (event) => {
+                    console.error("SpeechRecognition error:", event.error);
+                    if (event.error === 'not-allowed') {
+                        setError("Microphone permission denied.");
+                        stopRecording();
+                        return;
+                    }
+                    if (event.error === 'no-speech' || event.error === 'aborted') {
+                        return;
+                    }
+                    // For other critical errors, fall back to backend WebSocket
+                    if (isNativeRef.current) {
+                        if (selectedEngine === 'native') {
+                            setError(`Speech recognition error: ${event.error}`);
+                            stopRecording();
+                        } else {
+                            fallbackToWebSocket();
+                        }
+                    }
+                };
+
+                rec.onend = () => {
+                    // Restart only if we are still recording and native is still the active driver
+                    if (isRecordingRef.current && isNativeRef.current) {
+                        try {
+                            rec.start();
+                        } catch (e) {
+                            console.warn("Failed to restart speech recognition:", e);
+                        }
+                    }
+                };
+
+                recognitionRef.current = rec;
+                rec.start();
+
+                // Start local media recorder in background to buffer the audio
+                mediaRecorder.ondataavailable = (event) => {
+                    if (event.data.size > 100) {
+                        audioChunksRef.current.push(event.data);
+                        // If fallback was called mid-session and WebSocket is open, stream it
+                        if (!isNativeRef.current && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                            event.data.arrayBuffer().then((buf) => {
+                                if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                                    wsRef.current.send(buf);
+                                }
+                            }).catch(() => {});
+                        }
+                    }
+                };
+
+                mediaRecorder.onstop = () => {
+                    const blob = new Blob(audioChunksRef.current, { type: mimeType });
+                    setAudioBlob(blob);
+                    stream.getTracks().forEach((t) => t.stop());
+                    
+                    // Signal websocket done if active
+                    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                        wsRef.current.send('done');
+                    }
+                };
+
+                // Trigger chunk collection every 3 seconds
+                mediaRecorder.start(3000);
+
+            } else {
+                // Browser SpeechRecognition NOT supported/requested -> Immediate WebSocket fallback
+                isNativeRef.current = false;
+                
+                // Initialize WebSocket immediately
+                const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                let wsUrl = `${wsProtocol}//${window.location.hostname}:8000/ws/transcribe?lang=${encodeURIComponent(sourceLang)}`;
+                if (selectedEngine !== 'auto') {
+                    wsUrl += `&model=${encodeURIComponent(selectedEngine)}`;
+                }
+                const ws = new WebSocket(wsUrl);
+                wsRef.current = ws;
+
+                let providerName = 'Cloud Transcription';
+                if (selectedEngine === 'groq/whisper-large-v3') providerName = 'Groq Whisper v3';
+                else if (selectedEngine === 'groq/whisper-large-v3-turbo') providerName = 'Groq Whisper Turbo';
+                else if (selectedEngine.startsWith('deepgram')) providerName = 'Deepgram Nova-2';
+                else if (selectedEngine === 'local') providerName = 'Local Whisper';
+                setActiveProvider(providerName);
+
+                ws.onopen = () => {
+                    setLiveStatus('live');
+                    setWsStatusMsg('Listening...');
+                };
+
+                ws.onmessage = (event) => {
+                    try {
+                        const msg = JSON.parse(event.data);
+                        if (msg.type === 'segment' && msg.text) {
+                            transcriptRef.current = msg.text;
+                            setTranscript(msg.text);
+                            setWsStatusMsg('Listening...');
+                            if (msg.model_used) {
+                                setActiveProvider(getCleanProviderName(msg.model_used));
+                            }
+                            setTimeout(() => {
+                                if (liveViewRef.current) {
+                                    liveViewRef.current.scrollTop = liveViewRef.current.scrollHeight;
+                                }
+                            }, 50);
+                        } else if (msg.type === 'status') {
+                            setWsStatusMsg(msg.message || '');
+                        } else if (msg.type === 'done') {
+                            setLiveStatus('done');
+                            setWsStatusMsg('Transcription complete.');
+                        } else if (msg.type === 'error') {
+                            setError(`Transcription: ${msg.message}`);
+                            setLiveStatus('error');
+                        }
+                    } catch (_) {}
+                };
+
+                ws.onerror = () => {
+                    setError('WebSocket connection error. Check backend status.');
+                    setLiveStatus('error');
+                };
+
+                ws.onclose = () => {
+                    if (liveStatus !== 'done') setLiveStatus('idle');
+                };
+
+                mediaRecorder.ondataavailable = (event) => {
+                    if (event.data.size > 100 && ws.readyState === WebSocket.OPEN) {
+                        audioChunksRef.current.push(event.data);
+                        event.data.arrayBuffer().then((buf) => {
+                            if (ws.readyState === WebSocket.OPEN) {
+                                ws.send(buf);
+                            }
+                        }).catch(() => {});
+                    }
+                };
+
+                mediaRecorder.onstop = () => {
+                    const blob = new Blob(audioChunksRef.current, { type: mimeType });
+                    setAudioBlob(blob);
+                    stream.getTracks().forEach((t) => t.stop());
+                    if (ws.readyState === WebSocket.OPEN) {
+                        ws.send('done');
+                    }
+                };
+
+                mediaRecorder.start(3000);
+            }
 
         } catch (err) {
             console.error('Audio recording error:', err);
             setError('Could not access microphone. Please grant microphone permissions.');
             setLiveStatus('error');
+            isRecordingRef.current = false;
         }
     };
 
     const stopRecording = () => {
-        if (mediaRecorderRef.current && isRecording) {
-            mediaRecorderRef.current.stop();
-            setIsRecording(false);
-            clearInterval(timerRef.current);
-            setLiveStatus('done');
+        isRecordingRef.current = false;
+        
+        // Stop native speech recognition if active
+        if (isNativeRef.current && recognitionRef.current) {
+            isNativeRef.current = false;
+            try {
+                recognitionRef.current.stop();
+            } catch (e) {
+                console.error("Error stopping native recognition:", e);
+            }
         }
+        
+        // Stop media recorder
+        if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+            try {
+                mediaRecorderRef.current.stop();
+            } catch (e) {
+                console.error("Error stopping media recorder:", e);
+            }
+        }
+
+        setIsRecording(false);
+        clearInterval(timerRef.current);
+        setLiveStatus('done');
     };
 
     const clearAudio = () => {
+        isRecordingRef.current = false;
+        isNativeRef.current = false;
+        fallbackCalledRef.current = false;
+        
+        // Abort native speech recognition
+        if (recognitionRef.current) {
+            try {
+                recognitionRef.current.abort();
+            } catch (e) {}
+            recognitionRef.current = null;
+        }
+
         // Stop recording if active
         if (isRecording) {
             stopRecording();
@@ -353,12 +666,19 @@ const Dashboard = () => {
         transcriptRef.current = '';
         setLiveStatus('idle');
         setWsStatusMsg('');
+        setActiveProvider('');
     };
 
     const formatTime = (seconds) => {
         const mins = Math.floor(seconds / 60);
         const secs = seconds % 60;
         return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+    };
+
+    const handleCopyTranscript = () => {
+        navigator.clipboard.writeText(transcript);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
     };
 
     const stopDesktopCamera = () => {
@@ -609,6 +929,7 @@ const Dashboard = () => {
                                         <option value="Tamang">Tamang</option>
                                         <option value="Newari">Newari (Nepal Bhasa)</option>
                                         <option value="Nepali">Nepali</option>
+                                        <option value="English">English</option>
                                     </select>
                                 </div>
                                 <div className="selector-group">
@@ -621,6 +942,7 @@ const Dashboard = () => {
                                         <option value="Nepali">Nepali</option>
                                         <option value="Tamang">Tamang</option>
                                         <option value="Nepal Bhasa">Newari (Nepal Bhasa)</option>
+                                        <option value="English">English</option>
                                     </select>
                                 </div>
                             </div>
@@ -714,6 +1036,28 @@ const Dashboard = () => {
                                 </label>
                             ) : inputMode === 'audio' ? (
                                 <div className="audio-input-container">
+                                    {/* ── Engine Selection Dropdown ── */}
+                                    <div className="engine-select-row" style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '15px' }}>
+                                        <span className="text-secondary" style={{ fontSize: '0.85rem' }}>Transcription Method:</span>
+                                        <select 
+                                            className="lang-select"
+                                            value={selectedEngine} 
+                                            onChange={(e) => setSelectedEngine(e.target.value)}
+                                            style={{
+                                                padding: '0.4rem 0.8rem',
+                                                fontSize: '0.85rem',
+                                                borderRadius: '0.375rem',
+                                            }}
+                                            disabled={isRecording}
+                                        >
+                                            <option value="auto">Auto-Fallback Pipeline</option>
+                                            <option value="native">Browser-Native Speech API</option>
+                                            <option value="groq/whisper-large-v3">Groq Whisper v3</option>
+                                            <option value="groq/whisper-large-v3-turbo">Groq Whisper Turbo</option>
+                                            <option value="deepgram/nova-2">Deepgram Nova-2</option>
+                                            <option value="local">Local Offline Whisper</option>
+                                        </select>
+                                    </div>
                                     {/* ── Controls Row ── */}
                                     <div className={`audio-recorder-bar ${isRecording ? 'recording' : ''}`}>
                                         <div className="recorder-left">
@@ -777,9 +1121,17 @@ const Dashboard = () => {
                                                     <button
                                                         className="btn btn-ghost btn-xs"
                                                         title="Copy transcript"
-                                                        onClick={() => navigator.clipboard.writeText(transcript)}
+                                                        onClick={handleCopyTranscript}
                                                     >
-                                                        <FileText size={14} /> Copy
+                                                        {copied ? (
+                                                            <>
+                                                                <Check size={14} style={{ color: 'var(--success)' }} /> Copied!
+                                                            </>
+                                                        ) : (
+                                                            <>
+                                                                <FileText size={14} /> Copy
+                                                            </>
+                                                        )}
                                                     </button>
                                                     <button
                                                         className="btn btn-ghost btn-xs"

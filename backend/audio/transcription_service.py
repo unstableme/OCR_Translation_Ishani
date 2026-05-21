@@ -5,10 +5,11 @@ Flat, simple audio transcription. Tries cloud APIs in priority order,
 falls back to local Whisper. No unnecessary classes.
 
 Priority:
-  1. Groq  whisper-large-v3
-  2. Groq  whisper-large-v3-turbo
-  3. Deepgram  nova-2  (whisper-large for Nepali)
-  4. Local  faster-whisper
+  1. Browser Native
+  2. Groq  whisper-large-v3
+  3. Groq  whisper-large-v3-turbo
+  4. Deepgram  nova-2  (whisper-large for Nepali)
+  5. Local  faster-whisper
 """
 
 import os
@@ -34,7 +35,7 @@ SUPPORTED_AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg", ".webm", ".weba", 
 
 LANGUAGE_CODE_MAP = {
     "nepali": "ne", "tamang": "ne", "newari": "ne",
-    "tamang/newari": "ne", "hindi": "hi", "english": "en",
+    "tamang/newari": None, "hindi": "hi", "english": "en",
 }
 
 class TranscriptionError(Exception):
@@ -115,16 +116,36 @@ class TranscriptionService:
     # ------------------------------------------------------------------
     # Main entry point
     # ------------------------------------------------------------------
-    def transcribe(self, audio_path: str, source_language: str = "Nepali") -> Dict[str, Any]:
+    def transcribe(self, audio_path: str, source_language: str = "Nepali", force_model: str = None) -> Dict[str, Any]:
         t0 = time.time()
         normalized_path = None
         try:
             normalized_path = self._normalize_audio(audio_path)
             lang_code = LANGUAGE_CODE_MAP.get(source_language.lower(), "ne")
 
+            priorities = self.MODEL_PRIORITY
+            if force_model:
+                force_lower = force_model.lower()
+                if "/" in force_model:
+                    provider, model = force_model.split("/", 1)
+                    priorities = [(provider, model)]
+                else:
+                    # Check if the string matches any provider in MODEL_PRIORITY
+                    matching_provider = [item for item in self.MODEL_PRIORITY if item[0] == force_lower]
+                    if matching_provider:
+                        priorities = [matching_provider[0]]
+                    else:
+                        # Check if it matches any model name
+                        matching_model = [item for item in self.MODEL_PRIORITY if item[1] == force_lower]
+                        if matching_model:
+                            priorities = [matching_model[0]]
+                        else:
+                            # Fallback default
+                            priorities = [(force_model, "whisper")]
+
             # Try each model in priority order
             last_error = None
-            for provider, model in self.MODEL_PRIORITY:
+            for provider, model in priorities:
                 try:
                     if provider == "groq" and self.groq_key:
                         print(f"  → Trying {provider}/{model}...")
@@ -164,11 +185,14 @@ class TranscriptionService:
     def _transcribe_groq(self, path: str, lang: str, model: str) -> Dict[str, Any]:
         import httpx
         with open(path, "rb") as f:
+            data = {"model": model, "response_format": "verbose_json"}
+            if lang:
+                data["language"] = lang
             resp = httpx.post(
                 "https://api.groq.com/openai/v1/audio/transcriptions",
                 headers={"Authorization": f"Bearer {self.groq_key}"},
                 files={"file": (Path(path).name, f)},
-                data={"model": model, "language": lang, "response_format": "verbose_json"},
+                data=data,
                 timeout=60.0,
             )
         if resp.status_code != 200:
@@ -176,7 +200,7 @@ class TranscriptionService:
         data = resp.json()
         return {
             "transcribed_text": data.get("text", ""),
-            "language_detected": lang,
+            "language_detected": lang or data.get("language", ""),
             "audio_duration_seconds": data.get("duration", 0),
             "segments": data.get("segments", []),
         }
@@ -184,8 +208,11 @@ class TranscriptionService:
     def _transcribe_deepgram(self, path: str, lang: str) -> Dict[str, Any]:
         import httpx
         # Deepgram nova-2 doesn't support Nepali — use whisper-large for it
-        model = "whisper-large" if lang == "ne" else "nova-2"
-        url = f"https://api.deepgram.com/v1/listen?model={model}&language={lang}&smart_format=true"
+        if lang:
+            model = "whisper-large" if lang == "ne" else "nova-2"
+            url = f"https://api.deepgram.com/v1/listen?model={model}&language={lang}&smart_format=true"
+        else:
+            url = "https://api.deepgram.com/v1/listen?model=nova-2&detect_language=true&smart_format=true"
         with open(path, "rb") as f:
             resp = httpx.post(
                 url,
@@ -193,7 +220,7 @@ class TranscriptionService:
                 content=f.read(), timeout=60.0,
             )
         if resp.status_code != 200:
-            raise TranscriptionError(f"Deepgram ({model}) error: {resp.text}")
+            raise TranscriptionError(f"Deepgram error: {resp.text}")
         data = resp.json()
 
         # Safe extraction from Deepgram's nested response
