@@ -123,7 +123,7 @@ const Dashboard = () => {
     const [inputMode, setInputMode] = useState('file'); // 'file' | 'text'
     const [inputText, setInputText] = useState('');
     const [cameraMode, setCameraMode] = useState(false);
-    
+
     // Speech Synthesis State
     const [isReading, setIsReading] = useState(false);
 
@@ -144,10 +144,40 @@ const Dashboard = () => {
     const [wsStatusMsg, setWsStatusMsg] = useState('');
     const transcriptRef = useRef('');                       // mirror of transcript for WS callbacks
     const liveViewRef = useRef(null);
+    const [transcriptionModels, setTranscriptionModels] = useState([]);
 
-    // Browser-Native Speech Recognition State
+    useEffect(() => {
+        const fetchModels = async () => {
+            try {
+                const response = await axios.get(`${API_BASE_URL}/transcription-models`);
+                if (response.data && response.data.data) {
+                    const apiModels = response.data.data;
+                    const browserModel = { id: 'browser-native', value: 'browser-speech-API' };
+                    setTranscriptionModels([browserModel, ...apiModels]);
+                }
+            } catch (err) {
+                console.error("Failed to load transcription models:", err);
+            }
+        };
+        fetchModels();
+    }, []);
+
     const [activeProvider, setActiveProvider] = useState(''); // e.g., 'Chrome Native', 'Groq Whisper'
+    const [nativeSpeechLang, setNativeSpeechLang] = useState('ne-NP'); // 'ne-NP' | 'en-US' | 'hi-IN'
     const recognitionRef = useRef(null);
+
+    useEffect(() => {
+        if (!sourceLang) return;
+        const lowerSrc = sourceLang.toLowerCase();
+        if (lowerSrc === 'english') {
+            setNativeSpeechLang('en-US');
+        } else if (lowerSrc === 'hindi') {
+            setNativeSpeechLang('hi-IN');
+        } else {
+            // Tamang/Newari/Nepali/etc default to Nepali representation
+            setNativeSpeechLang('ne-NP');
+        }
+    }, [sourceLang]);
     const isNativeRef = useRef(false);
     const isRecordingRef = useRef(false);
     const fallbackCalledRef = useRef(false);
@@ -169,21 +199,21 @@ const Dashboard = () => {
 
     const handleReadAloud = () => {
         if (!result) return;
-        
+
         if (isReading) {
             window.speechSynthesis.cancel();
             setIsReading(false);
             return;
         }
 
-        const text = activeTab === 'translated' 
-            ? result.translated_text 
+        const text = activeTab === 'translated'
+            ? result.translated_text
             : result.extracted_text;
 
         if (!text) return;
 
         const utterance = new SpeechSynthesisUtterance(text);
-        
+
         // Try to set Nepali/Hindi voice for Devanagari script
         const voices = window.speechSynthesis.getVoices();
         const nepaliVoice = voices.find(voice => voice.lang.includes('ne') || voice.lang.includes('NE'));
@@ -195,9 +225,9 @@ const Dashboard = () => {
                 utterance.voice = hindiVoice;
             }
         }
-        
-        utterance.lang = activeTab === 'translated' && targetLang === 'Nepali' ? 'ne-NP' : 'hi-IN'; 
-        
+
+        utterance.lang = activeTab === 'translated' && targetLang === 'Nepali' ? 'ne-NP' : 'hi-IN';
+
         utterance.onstart = () => setIsReading(true);
         utterance.onend = () => setIsReading(false);
         utterance.onerror = () => setIsReading(false);
@@ -208,8 +238,8 @@ const Dashboard = () => {
     const startDesktopCamera = async () => {
         setError(null);
         try {
-            const stream = await navigator.mediaDevices.getUserMedia({ 
-                video: { width: { ideal: 1920 }, height: { ideal: 1080 } } 
+            const stream = await navigator.mediaDevices.getUserMedia({
+                video: { width: { ideal: 1920 }, height: { ideal: 1080 } }
             });
             setCameraMode(true);
             setTimeout(() => {
@@ -238,6 +268,7 @@ const Dashboard = () => {
 
     const getCleanProviderName = (modelStr) => {
         if (!modelStr) return 'Cloud AI';
+        if (modelStr === 'browser-speech-API') return 'Browser-Native Speech API';
         if (modelStr.includes('groq')) {
             const part = modelStr.split('/').pop();
             return `Groq Whisper (${part})`;
@@ -331,7 +362,7 @@ const Dashboard = () => {
                         setError(`Transcription Fallback Error: ${msg.message}`);
                         setLiveStatus('error');
                     }
-                } catch (_) {}
+                } catch (_) { }
             };
 
             ws.onerror = () => {
@@ -361,34 +392,20 @@ const Dashboard = () => {
         transcriptRef.current = '';
         setLiveStatus('connecting');
         setWsStatusMsg('Initializing...');
-        
+
         isRecordingRef.current = true;
         fallbackCalledRef.current = false;
 
-        if (!window.isSecureContext && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
-            setError('Microphone access requires a secure connection (HTTPS).');
-            setLiveStatus('error');
-            isRecordingRef.current = false;
-            return;
-        }
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-            setError('Your browser does not support audio recording.');
-            setLiveStatus('error');
-            isRecordingRef.current = false;
-            return;
-        }
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        const useNative = selectedEngine === 'browser-speech-API' || (selectedEngine === 'auto' && SpeechRecognition);
 
-        try {
-            // 1. Start microphone stream for MediaRecorder background recording
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-
-            const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-                ? 'audio/webm;codecs=opus'
-                : 'audio/webm';
-
-            const mediaRecorder = new MediaRecorder(stream, { mimeType });
-            mediaRecorderRef.current = mediaRecorder;
-            audioChunksRef.current = [];
+        if (useNative && SpeechRecognition) {
+            // Try Browser Native Speech Recognition
+            isNativeRef.current = true;
+            setActiveProvider(getBrowserNativeName());
+            setLiveStatus('live');
+            setWsStatusMsg('Listening...');
+            setIsRecording(true);
 
             // Update timer
             setRecordingTime(0);
@@ -396,141 +413,127 @@ const Dashboard = () => {
                 setRecordingTime((prev) => prev + 1);
             }, 1000);
 
-            setIsRecording(true);
+            const rec = new SpeechRecognition();
+            rec.continuous = true;
+            rec.interimResults = true;
 
-            // 2. Determine if SpeechRecognition is supported
-            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-            const useNative = selectedEngine === 'native' || (selectedEngine === 'auto' && SpeechRecognition);
+            rec.lang = nativeSpeechLang;
 
-            if (selectedEngine === 'native' && !SpeechRecognition) {
-                setError('Browser Native Speech Recognition is not supported in this browser.');
+            let finalTranscript = '';
+            rec.onresult = (event) => {
+                let interimTranscript = '';
+                for (let i = event.resultIndex; i < event.results.length; ++i) {
+                    if (event.results[i].isFinal) {
+                        finalTranscript += event.results[i][0].transcript + ' ';
+                    } else {
+                        interimTranscript += event.results[i][0].transcript;
+                    }
+                }
+                const currentText = (finalTranscript + interimTranscript).trim();
+                if (currentText) {
+                    setTranscript(currentText);
+                    transcriptRef.current = currentText;
+                    setTimeout(() => {
+                        if (liveViewRef.current) {
+                            liveViewRef.current.scrollTop = liveViewRef.current.scrollHeight;
+                        }
+                    }, 50);
+                }
+            };
+
+            rec.onerror = (event) => {
+                console.error("SpeechRecognition error:", event.error);
+                if (event.error === 'not-allowed') {
+                    setError("Microphone permission denied.");
+                    stopRecording();
+                    return;
+                }
+                if (event.error === 'no-speech' || event.error === 'aborted') {
+                    return;
+                }
+                // If the engine is browser-speech-API, do not fall back to cloud!
+                if (selectedEngine === 'browser-speech-API') {
+                    setError(`Speech recognition error: ${event.error}`);
+                    stopRecording();
+                    return;
+                }
+                // For other critical errors, fall back to backend WebSocket
+                if (isNativeRef.current) {
+                    fallbackToWebSocket();
+                }
+            };
+
+            rec.onend = () => {
+                // Restart only if we are still recording and native is still the active driver
+                if (isRecordingRef.current && isNativeRef.current) {
+                    try {
+                        rec.start();
+                    } catch (e) {
+                        console.warn("Failed to restart speech recognition:", e);
+                    }
+                }
+            };
+
+            recognitionRef.current = rec;
+            try {
+                rec.start();
+            } catch (e) {
+                console.error("Error starting SpeechRecognition:", e);
+                setError("Failed to start speech recognition.");
                 setLiveStatus('error');
                 isRecordingRef.current = false;
-                stream.getTracks().forEach((t) => t.stop());
-                clearInterval(timerRef.current);
                 setIsRecording(false);
+                clearInterval(timerRef.current);
+            }
+
+        } else {
+            // Check secure context and mediaDevices support
+            if (!window.isSecureContext && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+                setError('Microphone access requires a secure connection (HTTPS).');
+                setLiveStatus('error');
+                isRecordingRef.current = false;
+                return;
+            }
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                setError('Your browser does not support audio recording.');
+                setLiveStatus('error');
+                isRecordingRef.current = false;
                 return;
             }
 
-            if (useNative && SpeechRecognition) {
-                // Try Browser Native Speech Recognition
-                isNativeRef.current = true;
-                setActiveProvider(getBrowserNativeName());
-                setLiveStatus('live');
-                setWsStatusMsg('Listening...');
+            try {
+                // Browser SpeechRecognition NOT supported/requested or fallback -> Immediate WebSocket connection
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
-                const rec = new SpeechRecognition();
-                rec.continuous = true;
-                rec.interimResults = true;
+                const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+                    ? 'audio/webm;codecs=opus'
+                    : 'audio/webm';
 
-                // Map languages: Tamang/Newari/Nepali -> ne-NP (Nepali), Hindi -> hi-IN, English -> en-US
-                let langCode = 'ne-NP';
-                const lowerSrc = sourceLang.toLowerCase();
-                if (lowerSrc === 'hindi') langCode = 'hi-IN';
-                else if (lowerSrc === 'english') langCode = 'en-US';
-                rec.lang = langCode;
+                const mediaRecorder = new MediaRecorder(stream, { mimeType });
+                mediaRecorderRef.current = mediaRecorder;
+                audioChunksRef.current = [];
 
-                let finalTranscript = '';
-                rec.onresult = (event) => {
-                    let interimTranscript = '';
-                    for (let i = event.resultIndex; i < event.results.length; ++i) {
-                        if (event.results[i].isFinal) {
-                            finalTranscript += event.results[i][0].transcript + ' ';
-                        } else {
-                            interimTranscript += event.results[i][0].transcript;
-                        }
-                    }
-                    const currentText = (finalTranscript + interimTranscript).trim();
-                    if (currentText) {
-                        setTranscript(currentText);
-                        transcriptRef.current = currentText;
-                        setTimeout(() => {
-                            if (liveViewRef.current) {
-                                liveViewRef.current.scrollTop = liveViewRef.current.scrollHeight;
-                            }
-                        }, 50);
-                    }
-                };
+                // Update timer
+                setRecordingTime(0);
+                timerRef.current = setInterval(() => {
+                    setRecordingTime((prev) => prev + 1);
+                }, 1000);
 
-                rec.onerror = (event) => {
-                    console.error("SpeechRecognition error:", event.error);
-                    if (event.error === 'not-allowed') {
-                        setError("Microphone permission denied.");
-                        stopRecording();
-                        return;
-                    }
-                    if (event.error === 'no-speech' || event.error === 'aborted') {
-                        return;
-                    }
-                    // For other critical errors, fall back to backend WebSocket
-                    if (isNativeRef.current) {
-                        if (selectedEngine === 'native') {
-                            setError(`Speech recognition error: ${event.error}`);
-                            stopRecording();
-                        } else {
-                            fallbackToWebSocket();
-                        }
-                    }
-                };
-
-                rec.onend = () => {
-                    // Restart only if we are still recording and native is still the active driver
-                    if (isRecordingRef.current && isNativeRef.current) {
-                        try {
-                            rec.start();
-                        } catch (e) {
-                            console.warn("Failed to restart speech recognition:", e);
-                        }
-                    }
-                };
-
-                recognitionRef.current = rec;
-                rec.start();
-
-                // Start local media recorder in background to buffer the audio
-                mediaRecorder.ondataavailable = (event) => {
-                    if (event.data.size > 100) {
-                        audioChunksRef.current.push(event.data);
-                        // If fallback was called mid-session and WebSocket is open, stream it
-                        if (!isNativeRef.current && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                            event.data.arrayBuffer().then((buf) => {
-                                if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                                    wsRef.current.send(buf);
-                                }
-                            }).catch(() => {});
-                        }
-                    }
-                };
-
-                mediaRecorder.onstop = () => {
-                    const blob = new Blob(audioChunksRef.current, { type: mimeType });
-                    setAudioBlob(blob);
-                    stream.getTracks().forEach((t) => t.stop());
-                    
-                    // Signal websocket done if active
-                    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                        wsRef.current.send('done');
-                    }
-                };
-
-                // Trigger chunk collection every 3 seconds
-                mediaRecorder.start(3000);
-
-            } else {
-                // Browser SpeechRecognition NOT supported/requested -> Immediate WebSocket fallback
+                setIsRecording(true);
                 isNativeRef.current = false;
-                
+
                 // Initialize WebSocket immediately
                 const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
                 let wsUrl = `${wsProtocol}//${window.location.hostname}:8000/ws/transcribe?lang=${encodeURIComponent(sourceLang)}`;
-                if (selectedEngine !== 'auto') {
+                if (selectedEngine !== 'auto' && selectedEngine !== 'browser-speech-API') {
                     wsUrl += `&model=${encodeURIComponent(selectedEngine)}`;
                 }
                 const ws = new WebSocket(wsUrl);
                 wsRef.current = ws;
 
                 let providerName = 'Cloud Transcription';
-                if (selectedEngine === 'groq/whisper-large-v3') providerName = 'Groq Whisper v3';
+                if (selectedEngine === 'browser-speech-API') providerName = 'Browser Native Speech (Cloud Fallback)';
+                else if (selectedEngine === 'groq/whisper-large-v3') providerName = 'Groq Whisper v3';
                 else if (selectedEngine === 'groq/whisper-large-v3-turbo') providerName = 'Groq Whisper Turbo';
                 else if (selectedEngine.startsWith('deepgram')) providerName = 'Deepgram Nova-2';
                 else if (selectedEngine === 'local') providerName = 'Local Whisper';
@@ -565,7 +568,7 @@ const Dashboard = () => {
                             setError(`Transcription: ${msg.message}`);
                             setLiveStatus('error');
                         }
-                    } catch (_) {}
+                    } catch (_) { }
                 };
 
                 ws.onerror = () => {
@@ -584,7 +587,7 @@ const Dashboard = () => {
                             if (ws.readyState === WebSocket.OPEN) {
                                 ws.send(buf);
                             }
-                        }).catch(() => {});
+                        }).catch(() => { });
                     }
                 };
 
@@ -598,19 +601,19 @@ const Dashboard = () => {
                 };
 
                 mediaRecorder.start(3000);
-            }
 
-        } catch (err) {
-            console.error('Audio recording error:', err);
-            setError('Could not access microphone. Please grant microphone permissions.');
-            setLiveStatus('error');
-            isRecordingRef.current = false;
+            } catch (err) {
+                console.error('Audio recording error:', err);
+                setError('Could not access microphone. Please grant microphone permissions.');
+                setLiveStatus('error');
+                isRecordingRef.current = false;
+            }
         }
     };
 
     const stopRecording = () => {
         isRecordingRef.current = false;
-        
+
         // Stop native speech recognition if active
         if (isNativeRef.current && recognitionRef.current) {
             isNativeRef.current = false;
@@ -620,7 +623,7 @@ const Dashboard = () => {
                 console.error("Error stopping native recognition:", e);
             }
         }
-        
+
         // Stop media recorder
         if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
             try {
@@ -639,12 +642,12 @@ const Dashboard = () => {
         isRecordingRef.current = false;
         isNativeRef.current = false;
         fallbackCalledRef.current = false;
-        
+
         // Abort native speech recognition
         if (recognitionRef.current) {
             try {
                 recognitionRef.current.abort();
-            } catch (e) {}
+            } catch (e) { }
             recognitionRef.current = null;
         }
 
@@ -652,7 +655,7 @@ const Dashboard = () => {
         if (isRecording) {
             stopRecording();
         }
-        
+
         // Close WS if open
         if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
             wsRef.current.close();
@@ -697,7 +700,7 @@ const Dashboard = () => {
             canvas.height = video.videoHeight;
             const ctx = canvas.getContext('2d');
             ctx.drawImage(video, 0, 0);
-            
+
             canvas.toBlob((blob) => {
                 const capturedFile = new File([blob], `capture_${Date.now()}.jpg`, { type: "image/jpeg" });
                 handleFileChange({ target: { files: [capturedFile] } });
@@ -920,9 +923,9 @@ const Dashboard = () => {
                             <div className="language-selectors">
                                 <div className="selector-group">
                                     <label>Source Language</label>
-                                    <select 
-                                        className="lang-select" 
-                                        value={sourceLang} 
+                                    <select
+                                        className="lang-select"
+                                        value={sourceLang}
                                         onChange={(e) => setSourceLang(e.target.value)}
                                     >
                                         <option value="Tamang/Newari">Auto-Detect</option>
@@ -934,9 +937,9 @@ const Dashboard = () => {
                                 </div>
                                 <div className="selector-group">
                                     <label>Target Language</label>
-                                    <select 
-                                        className="lang-select" 
-                                        value={targetLang} 
+                                    <select
+                                        className="lang-select"
+                                        value={targetLang}
                                         onChange={(e) => setTargetLang(e.target.value)}
                                     >
                                         <option value="Nepali">Nepali</option>
@@ -1001,12 +1004,12 @@ const Dashboard = () => {
                                                         <p className="upload-text">Drag & drop or browse</p>
                                                         <p className="upload-hint">Supports JPG, PNG, PDF</p>
                                                     </div>
-                                                    
+
                                                     <div className="camera-scan-option">
                                                         <div className="separator text-secondary">
                                                             <span>OR</span>
                                                         </div>
-                                                        <button 
+                                                        <button
                                                             className="btn btn-secondary scan-btn"
                                                             onClick={(e) => {
                                                                 e.preventDefault();
@@ -1039,9 +1042,9 @@ const Dashboard = () => {
                                     {/* ── Engine Selection Dropdown ── */}
                                     <div className="engine-select-row" style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '15px' }}>
                                         <span className="text-secondary" style={{ fontSize: '0.85rem' }}>Transcription Method:</span>
-                                        <select 
+                                        <select
                                             className="lang-select"
-                                            value={selectedEngine} 
+                                            value={selectedEngine}
                                             onChange={(e) => setSelectedEngine(e.target.value)}
                                             style={{
                                                 padding: '0.4rem 0.8rem',
@@ -1051,11 +1054,11 @@ const Dashboard = () => {
                                             disabled={isRecording}
                                         >
                                             <option value="auto">Auto-Fallback Pipeline</option>
-                                            <option value="native">Browser-Native Speech API</option>
-                                            <option value="groq/whisper-large-v3">Groq Whisper v3</option>
-                                            <option value="groq/whisper-large-v3-turbo">Groq Whisper Turbo</option>
-                                            <option value="deepgram/nova-2">Deepgram Nova-2</option>
-                                            <option value="local">Local Offline Whisper</option>
+                                            {transcriptionModels.map((model) => (
+                                                <option key={model.id} value={model.value}>
+                                                    {getCleanProviderName(model.value)}
+                                                </option>
+                                            ))}
                                         </select>
                                     </div>
                                     {/* ── Controls Row ── */}
@@ -1159,7 +1162,7 @@ const Dashboard = () => {
                                         // EMPTY state
                                         <div className="audio-empty-hint">
                                             <Mic size={36} className="audio-empty-icon" />
-                                            <p>Press the mic button to start.<br/>Your words will appear here live as you speak.</p>
+                                            <p>Press the mic button to start.<br />Your words will appear here live as you speak.</p>
                                         </div>
                                     )}
                                 </div>
@@ -1174,7 +1177,7 @@ const Dashboard = () => {
                                     <div className="input-footer">
                                         <span>Character count: {inputText.length}</span>
                                         <span className="sample-hint" style={{ border: 'none', width: 'auto', padding: 0 }}>
-                                            Need a sample? 
+                                            Need a sample?
                                             <span className="sample-link" onClick={() => setInputText('छ्याल्हाबा, खन्ता बा तबा मुला?')}> Tamang</span>
                                         </span>
                                     </div>
@@ -1241,7 +1244,7 @@ const Dashboard = () => {
                                         title={isReading ? "Stop Reading" : "Read Aloud"}
                                         style={{ marginRight: '8px' }}
                                     >
-                                        {isReading ? <VolumeX size={16} /> : <Volume2 size={16} />} 
+                                        {isReading ? <VolumeX size={16} /> : <Volume2 size={16} />}
                                         {isReading ? " Stop" : " Read Aloud"}
                                     </button>
                                     <button
@@ -1282,7 +1285,7 @@ const Dashboard = () => {
                                             result.extracted_text
                                         )}
                                     </div>
-                                    
+
                                     {/* Results are now clean and focused only on text */}
 
                                     <div className="result-footer">
@@ -1312,8 +1315,8 @@ const Dashboard = () => {
                                         {inputMode === 'audio'
                                             ? 'Record audio, edit the transcript, then click "Translate Transcript" to see results here.'
                                             : inputMode === 'file'
-                                            ? 'Upload a document to see the translation results here.'
-                                            : 'Enter text and click translate to see the results here.'}
+                                                ? 'Upload a document to see the translation results here.'
+                                                : 'Enter text and click translate to see the results here.'}
                                     </p>
                                 </div>
                             )}
@@ -1331,10 +1334,10 @@ const Dashboard = () => {
                             <button className="btn-close" onClick={stopDesktopCamera}>&times;</button>
                         </div>
                         <div className="camera-viewfinder">
-                            <video 
-                                ref={videoRef} 
-                                autoPlay 
-                                playsInline 
+                            <video
+                                ref={videoRef}
+                                autoPlay
+                                playsInline
                                 className="webcam-feed"
                             />
                             <div className="scanning-guide"></div>

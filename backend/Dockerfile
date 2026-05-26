@@ -41,9 +41,6 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # Copy the rest of the application code
 COPY . .
 
-# Create uploads and debug directories
-RUN mkdir -p uploads
-
 # Expose port 8000
 EXPOSE 8000
 

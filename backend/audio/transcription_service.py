@@ -37,6 +37,13 @@ LANGUAGE_CODE_MAP = {
     "nepali": "ne", "tamang": "ne", "newari": "ne",
     "tamang/newari": None, "hindi": "hi", "english": "en",
 }
+#transcribe fn expects value(below) in provider/model format.
+AVAILABLE_MODELS = [
+    {"id": 1, "value": "groq/whisper-large-v3"},
+    {"id": 2, "value": "groq/whisper-large-v3-turbo"},
+    {"id": 3, "value": "deepgram/nova-2"},
+    {"id": 4, "value": "local/whisper"}
+]
 
 class TranscriptionError(Exception):
     """Raised when transcription fails."""
@@ -83,6 +90,7 @@ class TranscriptionService:
 
     def _has_cuda(self):
         try:
+            # pyrefly: ignore [missing-import]
             import torch
             return torch.cuda.is_available()
         except ImportError:
@@ -92,6 +100,7 @@ class TranscriptionService:
         """Lazy-load the local faster-whisper model. Just a pip library — no downloads."""
         if self._local_model is not None:
             return
+        # pyrefly: ignore [missing-import]
         from faster_whisper import WhisperModel
         threads = os.cpu_count() or 4
         logger.info("Loading faster-whisper model '%s' on %s with %d threads...", self.model_size, self.device, threads)
@@ -104,6 +113,7 @@ class TranscriptionService:
     def _normalize_audio(self, audio_path: str) -> str:
         """Normalize any audio format to 16kHz mono WAV."""
         try:
+            # pyrefly: ignore [missing-import]
             from pydub import AudioSegment
             audio = AudioSegment.from_file(audio_path).set_frame_rate(16000).set_channels(1)
             tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False, dir=os.path.dirname(audio_path))

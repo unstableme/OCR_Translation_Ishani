@@ -1,5 +1,6 @@
 import os
 import logging
+import tempfile
 from pathlib import Path
 from dotenv import load_dotenv, find_dotenv
 
@@ -39,10 +40,10 @@ from audio.transcription_service import (
     TranscriptionService,
     TranscriptionError,
     SUPPORTED_AUDIO_EXTENSIONS,
+    AVAILABLE_MODELS,
 )
 
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 
 
 app = FastAPI()
@@ -55,8 +56,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mount uploads directory
-app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+# Temporary directory for file processing (cleaned up after each request)
+# Java/Angular backend handles permanent file storage separately
+TEMP_PROCESSING_DIR = tempfile.mkdtemp(prefix="ocr_processing_")
+logger.info("Temp processing directory: %s", TEMP_PROCESSING_DIR)
 
 # Create database tables on startup
 #Base.metadata.create_all(bind=engine)
@@ -77,6 +80,14 @@ transcription_engine = TranscriptionService(model_size=model_size)
 async def root():
     """Health check / status endpoint."""
     return {"status": "running", "message": "OCR & Translation API is live"}
+
+@app.get("/transcription-models")
+async def get_transcription_models():
+    """
+    Returns a dynamic list of available transcription models for the frontend dropdown.
+    """
+    return {"data": AVAILABLE_MODELS}
+
 
 
 @app.post("/translate")
@@ -139,15 +150,14 @@ async def language_detection_endpoint(file: UploadFile = File(...)):
 
     import time
     t0 = time.time()
+    file_path = None
     
     try:
-        # 1. Save File (Temporary)
-        os.makedirs("uploads", exist_ok=True)
-        temp_filename = f"detect_{int(t0)}_{filename}"
-        file_path = f"uploads/{temp_filename}"
-
-        with open(file_path, "wb") as f:
-            f.write(await file.read())
+        # 1. Save File to temp directory (auto-cleaned after processing)
+        suffix = Path(filename).suffix
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False, dir=TEMP_PROCESSING_DIR, prefix="detect_") as tmp:
+            tmp.write(await file.read())
+            file_path = tmp.name
         
         # 2. OCR Extraction (Focusing on first page for speed/efficiency)
         extracted_pages = ocr_engine.process(file_path)
@@ -180,6 +190,12 @@ async def language_detection_endpoint(file: UploadFile = File(...)):
     except Exception as e:
         logger.error(f"Language detection failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if file_path and os.path.exists(file_path):
+            try:
+                os.unlink(file_path)
+            except OSError:
+                pass
 
 
 @app.post("/upload")
@@ -206,26 +222,26 @@ async def upload_file(
 
     import time
     t0 = time.time()  # Start of request
+    file_path = None
     
     db = SessionLocal()
     try:
-        # --- 1. File Upload / Save ---
+        # --- 1. File Save (Temporary — cleaned up after processing) ---
         t_upload_start = time.time()
-        os.makedirs("uploads", exist_ok=True)
-        file_path = f"uploads/{filename}"
-
-        # Optimization: Use a single read and write
+        suffix = Path(filename).suffix
         file_content = await file.read()
-        with open(file_path, "wb") as f:
-            f.write(file_content)
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False, dir=TEMP_PROCESSING_DIR, prefix="upload_") as tmp:
+            tmp.write(file_content)
+            file_path = tmp.name
         
         t_upload_end = time.time()
         upload_duration = t_upload_end - t_upload_start
 
         # Create Document object but defer final commit to reduce overhead
+        # stored_path records original filename for reference (Java/Angular stores the actual file)
         doc = Document(
             original_filename=filename,
-            stored_path=file_path,
+            stored_path=filename,
             status="Processing",
         )
         db.add(doc)
@@ -302,7 +318,7 @@ async def upload_file(
             "translation_id": translated_result.id,
             "extracted_text": extracted_text,
             "translated_text": translated_text,
-            "file_url": f"/uploads/{filename}",
+            "original_filename": filename,
             "ocr_confidence": round(avg_confidence, 4),
             "ocr_pages": detailed_result["pages"],
             "ocr_strategy": detailed_result.get("ocr_strategy", "unknown"),
@@ -328,6 +344,11 @@ async def upload_file(
         return {"error": str(e), "details": traceback.format_exc()}
     finally:
         db.close()
+        if file_path and os.path.exists(file_path):
+            try:
+                os.unlink(file_path)
+            except OSError:
+                pass
 
 
 @app.post("/upload_audio")
@@ -358,25 +379,26 @@ async def upload_audio(
 
     import time
     t0 = time.time()
+    file_path = None
 
     db = SessionLocal()
     try:
-        # 1. Save Audio File
+        # 1. Save Audio File (Temporary — cleaned up after processing)
         t_upload_start = time.time()
-        os.makedirs("uploads", exist_ok=True)
-        file_path = f"uploads/{filename}"
-
+        suffix = Path(filename).suffix
         file_content = await file.read()
-        with open(file_path, "wb") as f:
-            f.write(file_content)
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False, dir=TEMP_PROCESSING_DIR, prefix="audio_") as tmp:
+            tmp.write(file_content)
+            file_path = tmp.name
 
         t_upload_end = time.time()
         upload_duration = t_upload_end - t_upload_start
 
         # Create Document record
+        # stored_path records original filename for reference (Java/Angular stores the actual file)
         doc = Document(
             original_filename=filename,
-            stored_path=file_path,
+            stored_path=filename,
             status="Processing",
         )
         db.add(doc)
@@ -472,6 +494,11 @@ async def upload_audio(
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         db.close()
+        if file_path and os.path.exists(file_path):
+            try:
+                os.unlink(file_path)
+            except OSError:
+                pass
 
 
 @app.post("/transcribe")
@@ -498,14 +525,14 @@ async def transcribe_audio_only(
 
     import time
     t0 = time.time()
+    file_path = None
 
     try:
-        os.makedirs("uploads", exist_ok=True)
-        file_path = f"uploads/{filename}"
-
+        suffix = Path(filename).suffix
         file_content = await file.read()
-        with open(file_path, "wb") as f:
-            f.write(file_content)
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False, dir=TEMP_PROCESSING_DIR, prefix="transcribe_") as tmp:
+            tmp.write(file_content)
+            file_path = tmp.name
 
         result = transcription_engine.transcribe(
             file_path, source_language=source_lang, force_model=force_model
@@ -529,6 +556,12 @@ async def transcribe_audio_only(
     except Exception as e:
         logger.error("Transcription error: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if file_path and os.path.exists(file_path):
+            try:
+                os.unlink(file_path)
+            except OSError:
+                pass
 
 
 @app.websocket("/ws/transcribe")
@@ -608,11 +641,9 @@ async def ws_live_transcribe(websocket: WebSocket):
                 # This gives Whisper enough context for accurate transcription
                 tmp_webm = None
                 try:
-                    os.makedirs("uploads/ws_temp", exist_ok=True)
-
                     # Write accumulated bytes as a single webm file
                     with tempfile.NamedTemporaryFile(
-                        suffix=".webm", delete=False, dir="uploads/ws_temp"
+                        suffix=".webm", delete=False, dir=TEMP_PROCESSING_DIR
                     ) as f:
                         for chunk in audio_chunks:
                             f.write(chunk)
