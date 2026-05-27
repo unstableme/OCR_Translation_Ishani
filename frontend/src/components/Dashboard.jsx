@@ -151,8 +151,11 @@ const Dashboard = () => {
             try {
                 const response = await axios.get(`${API_BASE_URL}/transcription-models`);
                 if (response.data && response.data.data) {
-                    const apiModels = response.data.data;
-                    const browserModel = { id: 'browser-native', value: 'browser-speech-API' };
+                    const apiModels = response.data.data.map((model) => ({
+                        ...model,
+                        modelName: model.modelName || model.value,
+                    }));
+                    const browserModel = { id: 'browser-speech-API', modelName: 'browser-speech-API' };
                     setTranscriptionModels([browserModel, ...apiModels]);
                 }
             } catch (err) {
@@ -280,6 +283,20 @@ const Dashboard = () => {
             return 'Local Offline Whisper';
         }
         return modelStr;
+    };
+
+    const getModelOptionValue = (model) => {
+        if (model.modelName === 'browser-speech-API') return model.modelName;
+        return String(model.id ?? model.modelName ?? model.value);
+    };
+
+    const getSelectedModelName = () => {
+        const selectedModel = transcriptionModels.find((model) => (
+            String(model.id) === String(selectedEngine) ||
+            model.modelName === selectedEngine ||
+            model.value === selectedEngine
+        ));
+        return selectedModel?.modelName || selectedModel?.value || selectedEngine;
     };
 
     const getProviderClass = () => {
@@ -531,12 +548,10 @@ const Dashboard = () => {
                 const ws = new WebSocket(wsUrl);
                 wsRef.current = ws;
 
-                let providerName = 'Cloud Transcription';
-                if (selectedEngine === 'browser-speech-API') providerName = 'Browser Native Speech (Cloud Fallback)';
-                else if (selectedEngine === 'groq/whisper-large-v3') providerName = 'Groq Whisper v3';
-                else if (selectedEngine === 'groq/whisper-large-v3-turbo') providerName = 'Groq Whisper Turbo';
-                else if (selectedEngine.startsWith('deepgram')) providerName = 'Deepgram Nova-2';
-                else if (selectedEngine === 'local') providerName = 'Local Whisper';
+                const selectedModelName = getSelectedModelName();
+                const providerName = selectedEngine === 'browser-speech-API'
+                    ? 'Browser Native Speech (Cloud Fallback)'
+                    : getCleanProviderName(selectedModelName);
                 setActiveProvider(providerName);
 
                 ws.onopen = () => {
@@ -1055,8 +1070,8 @@ const Dashboard = () => {
                                         >
                                             <option value="auto">Auto-Fallback Pipeline</option>
                                             {transcriptionModels.map((model) => (
-                                                <option key={model.id} value={model.value}>
-                                                    {getCleanProviderName(model.value)}
+                                                <option key={model.id} value={getModelOptionValue(model)}>
+                                                    {getCleanProviderName(model.modelName || model.value)}
                                                 </option>
                                             ))}
                                         </select>
