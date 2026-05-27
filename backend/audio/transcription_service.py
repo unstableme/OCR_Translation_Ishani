@@ -37,13 +37,21 @@ LANGUAGE_CODE_MAP = {
     "nepali": "ne", "tamang": "ne", "newari": "ne",
     "tamang/newari": None, "hindi": "hi", "english": "en",
 }
-#transcribe fn expects value(below) in provider/model format.
+# transcribe fn expects modelName below in provider/model format.
 AVAILABLE_MODELS = [
-    {"id": 1, "value": "groq/whisper-large-v3"},
-    {"id": 2, "value": "groq/whisper-large-v3-turbo"},
-    {"id": 3, "value": "deepgram/nova-2"},
-    {"id": 4, "value": "local/whisper"}
+    {"id": 1, "modelName": "groq/whisper-large-v3"},
+    {"id": 2, "modelName": "groq/whisper-large-v3-turbo"},
+    {"id": 3, "modelName": "deepgram/nova-2"},
+    {"id": 4, "modelName": "local/whisper"}
 ]
+
+
+def get_model_name_by_id(model_id: int) -> str | None:
+    """Return the provider/model string for a public transcription model id."""
+    for item in AVAILABLE_MODELS:
+        if item["id"] == model_id:
+            return item["modelName"]
+    return None
 
 class TranscriptionError(Exception):
     """Raised when transcription fails."""
@@ -135,6 +143,11 @@ class TranscriptionService:
 
             priorities = self.MODEL_PRIORITY
             if force_model:
+                if str(force_model).isdigit():
+                    mapped_model = get_model_name_by_id(int(force_model))
+                    if mapped_model:
+                        force_model = mapped_model
+
                 force_lower = force_model.lower()
                 if "/" in force_model:
                     provider, model = force_model.split("/", 1)
