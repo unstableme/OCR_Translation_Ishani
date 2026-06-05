@@ -771,7 +771,7 @@ const Dashboard = () => {
     };
 
     const handleTranslate = async () => {
-        if (targetLang !== 'Nepali') {
+        if (targetLang !== 'Nepali' && targetLang !== 'English') {
             setError(`${targetLang} translation is currently unavailable. We are working on it!`);
             return;
         }

@@ -9,13 +9,14 @@ load_dotenv(find_dotenv())
 os.environ["OMP_THREAD_LIMIT"] = "1"
 
 client = openai.OpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=os.getenv("OPENROUTER_KEY")
+    base_url="https://api.groq.com/openai/v1",
+    api_key=os.getenv("GROQ_API_KEY")
 )
 
-MODEL = "google/gemini-2.0-flash-001"
-#MODEL = "google/gemma-3-27b-it:free"
-#MODEL = "meta-llama/llama-3.3-70b-instruct:free"
+MODEL = "llama-3.3-70b-versatile"
+#MODEL = "google/gemini-2.5-flash"  # OpenRouter
+#MODEL = "google/gemma-3-27b-it:free"  # OpenRouter
+#MODEL = "meta-llama/llama-3.3-70b-instruct:free"  # OpenRouter
 
 
 
@@ -79,6 +80,8 @@ def _call_llm(text: str, source_lang: str, target_lang: str, full_context: str =
 You are a high-precision Translation & OCR Restoration Engine.
 PRIMARY TASK: Translate the provided snippet from {source_lang} into {target_lang}.
 
+IMPORTANT: If the target language ({target_lang}) is English or any non-Devanagari language, SKIP all OCR restoration steps below and ONLY produce a direct, fluent translation into {target_lang}. The restoration steps below apply ONLY when the output is in a Devanagari-script language.
+
 ACCURACY CONTEXT:
 I will provide the FULL ORIGINAL DOCUMENT below. Use it ONLY as a reference to:
 1. Fix OCR errors in the snippet (e.g. cross-check digits vs written words across the whole doc).
@@ -108,6 +111,8 @@ Your primary goal is to produce a flawless, professional translation into {targe
 
 CORE OBJECTIVE:
 Translate the provided text from {source_lang} into {target_lang}.
+
+IMPORTANT: If the target language ({target_lang}) is English or any non-Devanagari language, SKIP all OCR restoration steps below and ONLY produce a direct, fluent translation into {target_lang}. The restoration steps below apply ONLY when the output is in a Devanagari-script language.
 
 Step 1: Background OCR Restoration (Mental Step)
 - Silently repair character-level OCR errors in the source Devanagari (e.g., missing matras, disconnected Shirorekas, or fragmented words like "काठमाडौा" → "काठमाडौँ").
