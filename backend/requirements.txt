@@ -28,3 +28,6 @@ python-doctr
 # Audio Processing & Transcription
 faster-whisper
 pydub
+
+# Google Gemini API
+google-genai

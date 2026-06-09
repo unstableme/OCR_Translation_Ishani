@@ -1,5 +1,8 @@
 import os
 import openai
+from google import genai
+from google.genai import types
+from pydantic import BaseModel
 from dotenv import load_dotenv, find_dotenv
 
 load_dotenv(find_dotenv())
@@ -8,15 +11,39 @@ load_dotenv(find_dotenv())
 # This prevents CPU over-saturation and context switching overhead.
 os.environ["OMP_THREAD_LIMIT"] = "1"
 
-client = openai.OpenAI(
-    base_url="https://api.groq.com/openai/v1",
-    api_key=os.getenv("GROQ_API_KEY")
-)
+# Commented out Groq OpenAI client setup in favor of Google Gemini 3.5 Flash
+# client = openai.OpenAI(
+#     base_url="https://api.groq.com/openai/v1",
+#     api_key=os.getenv("GROQ_API_KEY")
+# )
+# MODEL = "llama-3.3-70b-versatile"
 
-MODEL = "llama-3.3-70b-versatile"
-#MODEL = "google/gemini-2.5-flash"  # OpenRouter
-#MODEL = "google/gemma-3-27b-it:free"  # OpenRouter
-#MODEL = "meta-llama/llama-3.3-70b-instruct:free"  # OpenRouter
+# Initialize Google GenAI client
+api_key = os.getenv("GEMINI_API_KEY")
+if not api_key:
+    api_key = os.getenv("GOOGLE_API_KEY")
+
+# Ensure empty strings are treated as None so client uses default env lookup or handles properly
+if api_key == "":
+    api_key = None
+
+try:
+    if api_key:
+        gemini_client = genai.Client(api_key=api_key)
+    else:
+        print("WARNING: Google GenAI Client initialization skipped: GEMINI_API_KEY is not set.")
+        gemini_client = None
+except Exception as e:
+    print(f"WARNING: Google GenAI Client initialization failed: {e}")
+    gemini_client = None
+
+MODEL = "gemini-3.5-flash"
+
+class LanguageDetectionResult(BaseModel):
+    language: str
+    code: str
+    confidence: float
+
 
 
 
@@ -142,22 +169,37 @@ Output Requirements:
         {"role": "user", "content": f"SNIPPET TO TRANSLATE:\n{text}"}
     ]
 
-    try:
-        # OpenRouter-specific optimizations
-        extra_headers = {
-            "HTTP-Referer": "https://neptext-ocr.ai", 
-            "X-Title": "NepText OCR Pipeline",
-        }
-        response = client.chat.completions.create(
-            model=MODEL,
-            messages=messages,
-            temperature=0.1,
-            extra_headers=extra_headers
-        )
-        return response.choices[0].message.content.strip(), MODEL
-    except Exception as e:
-        print(f"LLM Error: {e}")
+    if not gemini_client:
+        print("LLM Error: Google GenAI Client is not initialized (missing or invalid API key)")
         return text, MODEL
+
+    models_to_try = [
+        "gemini-3.5-flash",
+        "gemini-3-flash-preview",
+        "gemini-3.1-flash-lite",
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
+        "gemini-2.5-pro",
+    ]
+    last_error = None
+    for model_name in models_to_try:
+        try:
+            response = gemini_client.models.generate_content(
+                model=model_name,
+                contents=f"SNIPPET TO TRANSLATE:\n{text}",
+                config=types.GenerateContentConfig(
+                    system_instruction=system_prompt.strip(),
+                    temperature=0.0,
+                )
+            )
+            return response.text.strip(), model_name
+        except Exception as e:
+            last_error = e
+            print(f"LLM Error with {model_name}: {e}. Trying next model...")
+            continue
+
+    print(f"All Gemini models failed. Last error: {last_error}")
+    return text, MODEL
 
 
 def translate_parallel_chunks(chunks: list[str], source_lang: str, target_lang: str, return_list: bool = False, full_context: str = None) -> tuple[str | list[str], str]:
@@ -210,20 +252,42 @@ Rules:
         {"role": "user", "content": snippet}
     ]
 
-    try:
-        response = client.chat.completions.create(
-            model=MODEL,
-            messages=messages,
-            temperature=0.1
-        )
-        content = response.choices[0].message.content.strip()
-        
-        # Strip markdown code blocks if the model included them
-        if content.startswith("```"):
-            content = content.replace("```json", "").replace("```", "").strip()
-            
-        import json
-        return json.loads(content)
-    except Exception as e:
-        print(f"Language detection failed: {e}")
+    if not gemini_client:
+        print("Language detection failed: Google GenAI Client is not initialized (missing or invalid API key)")
         return {"language": "Detection Error", "code": "error", "confidence": 0.0}
+
+    # Ordered by recency & availability. Excludes TTS/Live/Image-only models and quota-exhausted gemini-2.0-flash.
+    models_to_try = [
+        "gemini-3.5-flash",
+        "gemini-3.5-flash-lite",
+        "gemini-3.1-flash",
+        "gemini-3.1-flash-lite",
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
+        "gemini-2.5-pro",
+    ]
+    last_error = None
+    for model_name in models_to_try:
+        try:
+            response = gemini_client.models.generate_content(
+                model=model_name,
+                contents=snippet,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_prompt.strip(),
+                    temperature=0.0,
+                    response_mime_type="application/json",
+                    response_schema=LanguageDetectionResult,
+                )
+            )
+            if response.parsed:
+                return response.parsed.model_dump()
+            else:
+                import json
+                return json.loads(response.text.strip())
+        except Exception as e:
+            last_error = e
+            print(f"Language detection failed with {model_name}: {e}. Trying next model...")
+            continue
+
+    print(f"All Gemini models failed for language detection. Last error: {last_error}")
+    return {"language": "Detection Error", "code": "error", "confidence": 0.0}

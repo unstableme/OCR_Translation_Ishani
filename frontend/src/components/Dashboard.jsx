@@ -771,10 +771,6 @@ const Dashboard = () => {
     };
 
     const handleTranslate = async () => {
-        if (targetLang !== 'Nepali' && targetLang !== 'English') {
-            setError(`${targetLang} translation is currently unavailable. We are working on it!`);
-            return;
-        }
 
         // Audio mode: translate the live transcript text
         if (inputMode === 'audio') {
