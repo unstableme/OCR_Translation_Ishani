@@ -47,6 +47,13 @@ SUPPORTED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif"}
 SUPPORTED_PDF_EXTENSIONS = {".pdf"}
 SUPPORTED_WORD_EXTENSIONS = {".docx", ".doc"}
 SUPPORTED_EXTENSIONS = SUPPORTED_IMAGE_EXTENSIONS | SUPPORTED_PDF_EXTENSIONS | SUPPORTED_WORD_EXTENSIONS
+PDF_DIRECT_TEXT_MIN_CHARS = 80
+PDF_DIRECT_TEXT_MIN_WORDS = 12
+PDF_SCANNER_ARTIFACT_LINES = {
+    "camscanner",
+    "scanned with camscanner",
+    "scan with camscanner",
+}
 
 
 class OCRError(Exception):
@@ -70,6 +77,33 @@ def _make_page_result(text: str, confidence: float = 0.0,
 def _make_result(pages: list[dict]) -> dict:
     """Wrap page results in the standard output format."""
     return {"pages": pages}
+
+
+def _strip_pdf_text_artifacts(page_texts: list[str]) -> list[str]:
+    """Remove scanner watermark lines from direct PDF text extraction."""
+    cleaned_pages = []
+    for page_text in page_texts:
+        lines = []
+        for line in page_text.splitlines():
+            normalized = " ".join(line.strip().lower().split())
+            if normalized in PDF_SCANNER_ARTIFACT_LINES:
+                continue
+            lines.append(line)
+        cleaned_pages.append("\n".join(lines).strip())
+    return cleaned_pages
+
+
+def _direct_pdf_text_stats(page_texts: list[str]) -> tuple[int, int]:
+    combined = "\n".join(page_texts).strip()
+    return len("".join(combined.split())), len(combined.split())
+
+
+def _is_meaningful_direct_pdf_text(page_texts: list[str]) -> bool:
+    char_count, word_count = _direct_pdf_text_stats(page_texts)
+    return (
+        char_count >= PDF_DIRECT_TEXT_MIN_CHARS
+        or word_count >= PDF_DIRECT_TEXT_MIN_WORDS
+    )
 
 
 # ===================================================================
@@ -436,6 +470,8 @@ class HybridOCREngine:
                 wx2, wy2 = min(w_img, wx2+25), min(h_img, wy2+10)
                 text_mask[wy1:wy2, wx1:wx2] = 1
 
+        sidebar_area = masked_image[:, sidebar_x:].copy()
+        sidebar_protection = text_mask[:, sidebar_x:]
         sidebar_area[sidebar_protection == 0] = 255
         masked_image[:, sidebar_x:] = sidebar_area
 
@@ -518,16 +554,23 @@ class HybridOCREngine:
         cfg = self.preprocess_config
 
         pages = []
+        strategies = []
         for idx, pil_img in enumerate(images):
             preprocessed = preprocess_pil_image(pil_img, cfg)
             
             result = self.process_image(preprocessed)
+            strategy = result.get("ocr_strategy")
+            if strategy:
+                strategies.append(strategy)
             
             p = result["pages"][0]
             pages.append(p)
             logger.info("Hybrid processed page %d/%d", idx + 1, len(images))
 
-        return _make_result(pages)
+        pdf_result = _make_result(pages)
+        if strategies:
+            pdf_result["ocr_strategy"] = "+".join(dict.fromkeys(strategies))
+        return pdf_result
 
 
 # ===================================================================
@@ -633,11 +676,16 @@ class OCREngine:
         if ext in SUPPORTED_PDF_EXTENSIONS:
             logger.info("Processing PDF: %s", file_path)
             # Try direct text extraction first (born-digital PDFs)
-            direct_text = self._process_pdf_direct(str(path))
-            if direct_text and any(page.strip() for page in direct_text):
+            direct_text = _strip_pdf_text_artifacts(self._process_pdf_direct(str(path)))
+            if direct_text and _is_meaningful_direct_pdf_text(direct_text):
                 logger.info("Direct extraction successful for PDF")
                 return direct_text
-            logger.info("Direct extraction empty — falling back to OCR")
+            char_count, word_count = _direct_pdf_text_stats(direct_text)
+            logger.info(
+                "Direct extraction not meaningful (chars=%d, words=%d); falling back to OCR",
+                char_count,
+                word_count,
+            )
             result = self._hybrid.process_pdf(str(path), self.poppler_path)
             return [p["text"] for p in result["pages"]]
 
@@ -684,12 +732,18 @@ class OCREngine:
             )
 
         if ext in SUPPORTED_PDF_EXTENSIONS:
-            direct_text = self._process_pdf_direct(str(path))
-            if direct_text and any(page.strip() for page in direct_text):
+            direct_text = _strip_pdf_text_artifacts(self._process_pdf_direct(str(path)))
+            if direct_text and _is_meaningful_direct_pdf_text(direct_text):
                 return _make_result(
                     [_make_page_result(t, 1.0) for t in direct_text]
                 )
-            
+
+            char_count, word_count = _direct_pdf_text_stats(direct_text)
+            logger.info(
+                "Direct extraction not meaningful (chars=%d, words=%d); falling back to OCR",
+                char_count,
+                word_count,
+            )
             result = self._hybrid.process_pdf(str(path), self.poppler_path)
             return result
 

@@ -38,6 +38,26 @@ except Exception as e:
     gemini_client = None
 
 MODEL = "gemini-3.5-flash"
+PIVOT_LANGUAGE = "Nepali"
+PIVOTABLE_NON_NEPALI_LANGS = {"tamang", "newari"}
+LANGUAGE_ALIASES = {
+    "nepali": "nepali",
+    "ne": "nepali",
+    "tamang": "tamang",
+    "tam": "tamang",
+    "newari": "newari",
+    "newar": "newari",
+    "new": "newari",
+    "nepal bhasa": "newari",
+    "nepal bhasa newari": "newari",
+    "newari nepal bhasa": "newari",
+    "nepalbhasa": "newari",
+}
+LANGUAGE_DISPLAY_NAMES = {
+    "nepali": "Nepali",
+    "tamang": "Tamang",
+    "newari": "Nepal Bhasa (Newari)",
+}
 
 class LanguageDetectionResult(BaseModel):
     language: str
@@ -45,6 +65,131 @@ class LanguageDetectionResult(BaseModel):
     confidence: float
 
 
+def _canonical_lang_key(language: str) -> str:
+    """Map UI/API language labels to stable keys for routing."""
+    normalized = " ".join(
+        (language or "")
+        .lower()
+        .replace("(", " ")
+        .replace(")", " ")
+        .replace("/", " ")
+        .replace(",", " ")
+        .replace("+", " ")
+        .replace("_", " ")
+        .replace("-", " ")
+        .split()
+    )
+
+    has_tamang = "tamang" in normalized
+    has_newari = "newari" in normalized or "nepal bhasa" in normalized
+    if has_tamang and has_newari:
+        return "auto"
+    if has_tamang:
+        return "tamang"
+    if has_newari:
+        return "newari"
+
+    compact = normalized.replace(" ", "")
+    return LANGUAGE_ALIASES.get(normalized) or LANGUAGE_ALIASES.get(compact) or normalized
+
+
+def _display_lang(language: str) -> str:
+    key = _canonical_lang_key(language)
+    return LANGUAGE_DISPLAY_NAMES.get(key, (language or "").strip() or "Unknown")
+
+
+def _should_translate_via_nepali(source_lang: str, target_lang: str) -> bool:
+    source_key = _canonical_lang_key(source_lang)
+    target_key = _canonical_lang_key(target_lang)
+    return (
+        source_key in PIVOTABLE_NON_NEPALI_LANGS
+        and target_key in PIVOTABLE_NON_NEPALI_LANGS
+        and source_key != target_key
+    )
+
+
+def _combine_model_names(*model_names: str) -> str:
+    unique = [name for name in dict.fromkeys(model_names) if name]
+    return " -> ".join(unique) if unique else MODEL
+
+
+def _target_language_guard(target_lang: str) -> str:
+    target_key = _canonical_lang_key(target_lang)
+    if target_key == "tamang":
+        return """
+CRITICAL TARGET LANGUAGE CONTROL:
+- The final output MUST be Tamang, written in Devanagari script.
+- Do NOT output Nepali unless the source contains an official Nepali proper noun, address, or quoted phrase.
+- Nepali is allowed only as meaning/context support, never as the final translation language.
+- If the input is Nepali from an intermediate pivot step, translate it fully into Tamang; do not polish, summarize, or return the Nepali input.
+- Prefer Tamang vocabulary and sentence structure. Avoid standard Nepali phrasing except for proper nouns, official names, or quoted source text.
+""".strip()
+    if target_key == "newari":
+        return """
+CRITICAL TARGET LANGUAGE CONTROL:
+- The final output MUST be Nepal Bhasa/Newari, written in Devanagari script.
+- Do NOT output Nepali unless the source contains an official Nepali proper noun, address, or quoted phrase.
+- Nepali is allowed only as meaning/context support, never as the final translation language.
+- If the input is Nepali from an intermediate pivot step, translate it fully into Nepal Bhasa/Newari; do not polish, summarize, or return the Nepali input.
+- Prefer Nepal Bhasa/Newari vocabulary and sentence structure. Avoid standard Nepali phrasing except for proper nouns, official names, or quoted source text.
+""".strip()
+    if target_key == "nepali":
+        return """
+CRITICAL TARGET LANGUAGE CONTROL:
+- The final output MUST be Nepali, written in Devanagari script.
+- Keep Tamang or Nepal Bhasa/Newari words only when they are proper nouns or quoted terms.
+""".strip()
+    return ""
+
+
+def _translate_via_nepali(
+    text_input: str | list[str],
+    source_lang: str,
+    target_lang: str,
+) -> tuple[str | list[str], str]:
+    source_display = _display_lang(source_lang)
+    target_display = _display_lang(target_lang)
+    print(
+        f"Using Nepali pivot translation: {source_display} -> "
+        f"{PIVOT_LANGUAGE} -> {target_display}"
+    )
+
+    nepali_text, first_model = _translate_direct(text_input, source_display, PIVOT_LANGUAGE)
+    final_text, second_model = _translate_direct(nepali_text, PIVOT_LANGUAGE, target_display)
+    return final_text, f"nepali_pivot:{_combine_model_names(first_model, second_model)}"
+
+
+def _translate_direct(
+    text_input: str | list[str],
+    source_lang: str,
+    target_lang: str,
+) -> tuple[str | list[str], str]:
+    source_display = _display_lang(source_lang)
+    target_display = _display_lang(target_lang)
+
+    if isinstance(text_input, list):
+        # Already split by pages, run page-parallel
+        return translate_parallel_chunks(
+            text_input,
+            source_display,
+            target_display,
+            return_list=False,
+        )
+
+    # For a single page/string, check if it's long enough to benefit from chunking
+    # Average 300 words is the threshold where parallelization starts saving time
+    word_count = len(text_input.split())
+    if word_count > 300:
+        chunks = _split_into_chunks(text_input)
+        # Pass the full original text as context to each chunk to preserve accuracy
+        return translate_parallel_chunks(
+            chunks,
+            source_display,
+            target_display,
+            full_context=text_input,
+        )
+
+    return _call_llm(text_input, source_display, target_display)
 
 
 def translate_text(text_input: str | list[str], source_lang: str = "Tamang/Newari", target_lang: str = "Nepali") -> tuple[str | list[str], str]:
@@ -53,19 +198,10 @@ def translate_text(text_input: str | list[str], source_lang: str = "Tamang/Newar
     OPTIMIZATION: If a single long string is provided, it is chunked into paragraphs 
     and translated in parallel to hit the < 5s latency target.
     """
-    if (isinstance(text_input, list)):
-        # Already split by pages, run page-parallel
-        return translate_parallel_chunks(text_input, source_lang, target_lang, return_list=False)
+    if _should_translate_via_nepali(source_lang, target_lang):
+        return _translate_via_nepali(text_input, source_lang, target_lang)
 
-    # For a single page/string, check if it's long enough to benefit from chunking
-    # Average 300 words is the threshold where parallelization starts saving time
-    word_count = len(text_input.split())
-    if word_count > 300:
-        chunks = _split_into_chunks(text_input)
-        # Pass the full original text as context to each chunk to preserve accuracy
-        return translate_parallel_chunks(chunks, source_lang, target_lang, full_context=text_input)
-
-    return _call_llm(text_input, source_lang, target_lang)
+    return _translate_direct(text_input, source_lang, target_lang)
 
 
 def _split_into_chunks(text: str, target_word_count: int = 250) -> list[str]:
@@ -96,16 +232,15 @@ def _call_llm(text: str, source_lang: str, target_lang: str, full_context: str =
     if not text.strip():
         return "", MODEL
 
-    # Define supported Himalayan languages that need specialized Devanagari handling
-    HIMALAYAN_LANGS = {"tamang", "newari"}
-    source_parts = [p.strip().lower() for p in source_lang.replace("/", " ").replace(",", " ").split()]
-    is_himalayan = any(part in HIMALAYAN_LANGS for part in source_parts)
+    target_guard = _target_language_guard(target_lang)
 
     if full_context:
         # Prompt for chunked translation where accuracy depends on seeing the whole doc
         system_prompt = f"""
 You are a high-precision Translation & OCR Restoration Engine.
 PRIMARY TASK: Translate the provided snippet from {source_lang} into {target_lang}.
+
+{target_guard}
 
 IMPORTANT: If the target language ({target_lang}) is English or any non-Devanagari language, SKIP all OCR restoration steps below and ONLY produce a direct, fluent translation into {target_lang}. The restoration steps below apply ONLY when the output is in a Devanagari-script language.
 
@@ -138,6 +273,8 @@ Your primary goal is to produce a flawless, professional translation into {targe
 
 CORE OBJECTIVE:
 Translate the provided text from {source_lang} into {target_lang}.
+
+{target_guard}
 
 IMPORTANT: If the target language ({target_lang}) is English or any non-Devanagari language, SKIP all OCR restoration steps below and ONLY produce a direct, fluent translation into {target_lang}. The restoration steps below apply ONLY when the output is in a Devanagari-script language.
 
@@ -216,12 +353,13 @@ def translate_parallel_chunks(chunks: list[str], source_lang: str, target_lang: 
         results = list(executor.map(translate_single, chunks))
 
     translated_texts = [res[0] for res in results]
+    model_used = _combine_model_names(*(res[1] for res in results))
     
     if return_list:
-        return translated_texts, MODEL
+        return translated_texts, model_used
         
     combined_text = "\n\n".join(translated_texts)
-    return combined_text, MODEL
+    return combined_text, model_used
 
 
 def detect_language(text: str) -> dict:

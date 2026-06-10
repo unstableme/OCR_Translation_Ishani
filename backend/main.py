@@ -337,11 +337,9 @@ async def upload_file(
         db.rollback()
         raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
-        import traceback
-
-        traceback.print_exc()
+        logger.exception("Upload processing failed")
         db.rollback()
-        return {"error": str(e), "details": traceback.format_exc()}
+        raise HTTPException(status_code=500, detail=str(e))
     finally:
         db.close()
         if file_path and os.path.exists(file_path):
