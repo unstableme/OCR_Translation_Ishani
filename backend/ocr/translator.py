@@ -1,4 +1,6 @@
 import os
+import re
+import time
 import openai
 from google import genai
 from google.genai import types
@@ -176,17 +178,21 @@ def _translate_direct(
             return_list=False,
         )
 
-    # For a single page/string, check if it's long enough to benefit from chunking
-    # Average 300 words is the threshold where parallelization starts saving time
+    # For a single page/string, check if it's long enough to benefit from chunking.
+    # Pasted text is often one large block, unlike OCR uploads which arrive as a
+    # list of pages and are already translated in parallel.
     word_count = len(text_input.split())
     if word_count > 300:
         chunks = _split_into_chunks(text_input)
-        # Pass the full original text as context to each chunk to preserve accuracy
+        print(
+            "Translation chunking: "
+            f"single text with {word_count} words split into {len(chunks)} chunks"
+        )
         return translate_parallel_chunks(
             chunks,
             source_display,
             target_display,
-            full_context=text_input,
+            full_context=_build_compact_context(text_input, chunks),
         )
 
     return _call_llm(text_input, source_display, target_display)
@@ -204,27 +210,77 @@ def translate_text(text_input: str | list[str], source_lang: str = "Tamang/Newar
     return _translate_direct(text_input, source_lang, target_lang)
 
 
-def _split_into_chunks(text: str, target_word_count: int = 250) -> list[str]:
-    """Splits text into logical chunks by paragraph breaks."""
-    paragraphs = text.split('\n\n')
+def _split_into_chunks(text: str, target_word_count: int = 220) -> list[str]:
+    """Split text into bounded chunks even when pasted as one large block."""
+    units = _split_text_units(text)
     chunks = []
     current_chunk = []
     current_count = 0
 
-    for p in paragraphs:
-        p_words = len(p.split())
-        if current_count + p_words > target_word_count and current_chunk:
+    for unit in units:
+        unit = unit.strip()
+        if not unit:
+            continue
+
+        unit_words = len(unit.split())
+        if unit_words > target_word_count:
+            if current_chunk:
+                chunks.append('\n\n'.join(current_chunk))
+                current_chunk = []
+                current_count = 0
+            chunks.extend(_split_large_unit(unit, target_word_count))
+        elif current_count + unit_words > target_word_count and current_chunk:
             chunks.append('\n\n'.join(current_chunk))
-            current_chunk = [p]
-            current_count = p_words
+            current_chunk = [unit]
+            current_count = unit_words
         else:
-            current_chunk.append(p)
-            current_count += p_words
+            current_chunk.append(unit)
+            current_count += unit_words
 
     if current_chunk:
         chunks.append('\n\n'.join(current_chunk))
-    
+
     return chunks
+
+
+def _split_text_units(text: str) -> list[str]:
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n", text) if part.strip()]
+    if len(paragraphs) > 1:
+        return paragraphs
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) > 1:
+        return lines
+
+    sentences = [
+        part.strip()
+        for part in re.split(r"(?<=[।.!?])\s+", text)
+        if part.strip()
+    ]
+    return sentences or [text]
+
+
+def _split_large_unit(text: str, target_word_count: int) -> list[str]:
+    words = text.split()
+    if len(words) <= target_word_count:
+        return [text]
+
+    chunks = []
+    for start in range(0, len(words), target_word_count):
+        chunks.append(" ".join(words[start:start + target_word_count]))
+    return chunks
+
+
+def _build_compact_context(text: str, chunks: list[str], max_chars: int = 1800) -> str | None:
+    if len(chunks) <= 1:
+        return None
+
+    cleaned = " ".join(text.split())
+    if len(cleaned) <= max_chars:
+        return cleaned
+
+    half = max_chars // 2
+    return f"{cleaned[:half]} ... {cleaned[-half:]}"
 
 
 def _call_llm(text: str, source_lang: str, target_lang: str, full_context: str = None) -> tuple[str, str]:
@@ -345,6 +401,7 @@ def translate_parallel_chunks(chunks: list[str], source_lang: str, target_lang: 
 
     # Higher thread count for small chunks since I/O bound
     max_workers = min(len(chunks), 8)
+    start_time = time.time()
     
     def translate_single(chunk):
         return _call_llm(chunk, source_lang, target_lang, full_context=full_context)
@@ -359,6 +416,10 @@ def translate_parallel_chunks(chunks: list[str], source_lang: str, target_lang: 
         return translated_texts, model_used
         
     combined_text = "\n\n".join(translated_texts)
+    print(
+        "Parallel translation complete: "
+        f"{len(chunks)} chunks, {max_workers} workers, {time.time() - start_time:.2f}s"
+    )
     return combined_text, model_used
 
 

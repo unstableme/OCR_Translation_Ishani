@@ -54,6 +54,7 @@ PDF_SCANNER_ARTIFACT_LINES = {
     "scan with camscanner",
 }
 MIN_LAYOUT_REGION_CHARS = 80
+FAST_PATH_PSM_MODES = ("--psm 3", "--psm 4", "--psm 6", "--psm 11", "--psm 1")
 
 
 class OCRError(Exception):
@@ -119,6 +120,7 @@ class TesseractOCREngine:
     for standard document extraction due to its high performance and native 
     script support.
     """
+    _available_languages: set[str] | None = None
 
     def __init__(
         self,
@@ -129,6 +131,29 @@ class TesseractOCREngine:
         self.lang = lang
         self.tesseract_config = tesseract_config
         self.preprocess_config = preprocess_config
+
+    @classmethod
+    def _get_available_languages(cls) -> set[str]:
+        if cls._available_languages is None:
+            try:
+                cls._available_languages = set(pt.get_languages(config=""))
+            except pt.TesseractError as exc:
+                raise OCRError(f"Could not inspect Tesseract languages: {exc}") from exc
+        return cls._available_languages
+
+    def _validate_language_packs(self) -> None:
+        requested = {part for part in self.lang.split("+") if part}
+        missing = sorted(requested - self._get_available_languages())
+        if not missing:
+            return
+
+        available = ", ".join(sorted(self._get_available_languages())) or "none"
+        raise OCRError(
+            "Missing Tesseract language data for "
+            f"{', '.join(missing)}. Available languages: {available}. "
+            "Install the requested traineddata files before OCR; otherwise "
+            "Devanagari text may be misread as English gibberish."
+        )
 
     def process_image(self, image: np.ndarray) -> dict:
         """
@@ -158,6 +183,8 @@ class TesseractOCREngine:
         4. Calculates a weighted average confidence based on word-level results.
         """
         try:
+            self._validate_language_packs()
+
             # Single Tesseract call — get everything from image_to_data
             data = pt.image_to_data(
                 image, lang=self.lang, config=self.tesseract_config,
@@ -394,7 +421,8 @@ class HybridOCREngine:
 
             boxes.append([x, y, x + w, y + h])
 
-        return self._merge_nearby_boxes(boxes)
+        merged = self._merge_nearby_boxes(boxes)
+        return self._split_wide_line_boxes(merged, binary, image.shape)
 
     def _merge_nearby_boxes(self, boxes: list[list[int]]) -> list[list[int]]:
         """Merge line fragments split by punctuation, short words, or ligatures."""
@@ -430,6 +458,75 @@ class HybridOCREngine:
                 merged.append(box)
 
         return merged
+
+    def _split_wide_line_boxes(
+        self,
+        boxes: list[list[int]],
+        binary: np.ndarray,
+        image_shape: tuple[int, int],
+    ) -> list[list[int]]:
+        """
+        Split rows that were accidentally merged across multiple columns.
+
+        Newspaper/article pages often have columns whose baselines align. The
+        dilation step can connect those separate lines into one page-wide box,
+        especially in photographed paper. Horizontal projection recovers the
+        real text runs while leaving large headlines untouched.
+        """
+        if not boxes:
+            return []
+
+        h_img, w_img = image_shape[:2]
+        split_boxes: list[list[int]] = []
+        for box in boxes:
+            x1, y1, x2, y2 = box
+            width = x2 - x1
+            height = y2 - y1
+            if width < w_img * 0.72 or height > max(75, int(h_img * 0.07)):
+                split_boxes.append(box)
+                continue
+
+            crop = binary[y1:y2, x1:x2]
+            projection = np.count_nonzero(crop, axis=0).astype(np.float32)
+            smooth_width = max(17, int(w_img * 0.013))
+            if smooth_width % 2 == 0:
+                smooth_width += 1
+            smoothed = cv2.blur(projection.reshape(1, -1), (smooth_width, 1)).ravel()
+            threshold = max(1.0, float(np.percentile(smoothed, 70)) * 0.35)
+            active = smoothed > threshold
+
+            runs: list[list[int]] = []
+            start = None
+            for idx, is_active in enumerate(active):
+                if is_active and start is None:
+                    start = idx
+                elif not is_active and start is not None:
+                    runs.append([start, idx])
+                    start = None
+            if start is not None:
+                runs.append([start, width])
+
+            merged_runs: list[list[int]] = []
+            max_word_gap = max(18, int(w_img * 0.02))
+            for run in runs:
+                if merged_runs and run[0] - merged_runs[-1][1] < max_word_gap:
+                    merged_runs[-1][1] = run[1]
+                else:
+                    merged_runs.append(run)
+
+            min_piece_w = max(55, int(w_img * 0.035))
+            pieces = [
+                [x1 + run[0], y1, x1 + run[1], y2]
+                for run in merged_runs
+                if (run[1] - run[0]) >= min_piece_w
+            ]
+
+            if len(pieces) >= 2:
+                split_boxes.extend(pieces)
+            else:
+                split_boxes.append(box)
+
+        return sorted(split_boxes, key=lambda b: (b[1], b[0]))
 
     def _group_lines_into_regions(
         self,
@@ -560,6 +657,7 @@ class HybridOCREngine:
         projection_regions = self._detect_projection_columns(image)
         if len(projection_regions) >= 2:
             regions = self._replace_overlapping_regions(regions, projection_regions)
+        regions = self._remove_redundant_regions(regions, image.shape)
         return self._sort_regions_for_reading(regions, image.shape[1])
 
     def _detect_projection_columns(self, image: np.ndarray) -> list[dict]:
@@ -568,7 +666,9 @@ class HybridOCREngine:
 
         This supplements line detection for bulletin/newspaper pages where
         same-row columns can be visually close enough to touch after dilation.
-        It is activated only when at least two substantial columns are found.
+        It scans the page for text bands first, then looks for side-by-side
+        columns inside each band. That keeps the detector layout-agnostic: the
+        columns may appear near the top, middle, bottom, or only in one section.
         """
         h_img, w_img = image.shape[:2]
         gray = image if len(image.shape) == 2 else cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -582,70 +682,96 @@ class HybridOCREngine:
             11,
         )
 
-        body_y1 = int(h_img * 0.52)
-        body_y2 = int(h_img * 0.97)
-        if body_y2 <= body_y1:
-            return []
+        row_counts = np.count_nonzero(binary, axis=1)
+        min_row_ink = max(3, int(w_img * 0.003))
+        max_row_ink = int(w_img * 0.65)
+        row_mask = ((row_counts >= min_row_ink) & (row_counts <= max_row_ink)).astype(np.uint8) * 255
+        close_kernel_h = max(25, int(h_img * 0.035))
+        row_mask = cv2.morphologyEx(
+            row_mask.reshape(-1, 1),
+            cv2.MORPH_CLOSE,
+            cv2.getStructuringElement(cv2.MORPH_RECT, (1, close_kernel_h)),
+        ).ravel() > 0
 
-        body = binary[body_y1:body_y2, :]
-        row_counts = np.count_nonzero(body, axis=1)
-        text_rows = row_counts < w_img * 0.45
-        if np.count_nonzero(text_rows) < 20:
-            return []
-
-        body_for_projection = body[text_rows]
-        projection = np.count_nonzero(body_for_projection, axis=0).astype(np.float32)
-        smoothed = cv2.blur(projection.reshape(1, -1), (31, 1)).ravel()
-        threshold = max(2.0, float(np.percentile(smoothed, 65)) * 0.35)
-        active = smoothed > threshold
-
-        runs: list[list[int]] = []
+        bands: list[list[int]] = []
         start = None
-        for idx, is_active in enumerate(active):
+        for idx, is_active in enumerate(row_mask):
             if is_active and start is None:
                 start = idx
             elif not is_active and start is not None:
-                runs.append([start, idx])
+                bands.append([start, idx])
                 start = None
         if start is not None:
-            runs.append([start, w_img])
+            bands.append([start, h_img])
 
-        merged_runs: list[list[int]] = []
-        max_word_gap = max(18, int(w_img * 0.022))
-        for run in runs:
-            if merged_runs and run[0] - merged_runs[-1][1] < max_word_gap:
-                merged_runs[-1][1] = run[1]
-            else:
-                merged_runs.append(run)
-
-        columns = [
-            run for run in merged_runs
-            if (run[1] - run[0]) >= max(120, int(w_img * 0.16))
-        ]
-        if len(columns) < 2:
+        min_band_h = max(55, int(h_img * 0.045))
+        bands = [band for band in bands if (band[1] - band[0]) >= min_band_h]
+        if not bands:
             return []
 
         regions = []
-        for x1, x2 in columns:
-            pad_x = max(4, int((x2 - x1) * 0.015))
-            x1 = max(0, x1 - pad_x)
-            x2 = min(w_img, x2 + pad_x)
-            col = binary[body_y1:body_y2, x1:x2]
-            col_row_counts = np.count_nonzero(col, axis=1)
-            row_threshold = max(3, int((x2 - x1) * 0.018))
-            rows = np.where((col_row_counts > row_threshold) & (col_row_counts < (x2 - x1) * 0.55))[0]
-            if len(rows) < 5:
+        for band_y1, band_y2 in bands:
+            band = binary[band_y1:band_y2, :]
+            band_row_counts = np.count_nonzero(band, axis=1)
+            usable_rows = (band_row_counts >= min_row_ink) & (band_row_counts <= max_row_ink)
+            if np.count_nonzero(usable_rows) < 8:
                 continue
 
-            y1 = body_y1 + int(rows[0])
-            y2 = body_y1 + int(rows[-1]) + 1
-            if (y2 - y1) < max(70, int(h_img * 0.08)):
+            projection = np.count_nonzero(band[usable_rows], axis=0).astype(np.float32)
+            smooth_width = max(21, int(w_img * 0.018))
+            if smooth_width % 2 == 0:
+                smooth_width += 1
+            smoothed = cv2.blur(projection.reshape(1, -1), (smooth_width, 1)).ravel()
+            threshold = max(2.0, float(np.percentile(smoothed, 65)) * 0.35)
+            active = smoothed > threshold
+
+            runs: list[list[int]] = []
+            run_start = None
+            for idx, is_active in enumerate(active):
+                if is_active and run_start is None:
+                    run_start = idx
+                elif not is_active and run_start is not None:
+                    runs.append([run_start, idx])
+                    run_start = None
+            if run_start is not None:
+                runs.append([run_start, w_img])
+
+            merged_runs: list[list[int]] = []
+            max_word_gap = max(18, int(w_img * 0.022))
+            for run in runs:
+                if merged_runs and run[0] - merged_runs[-1][1] < max_word_gap:
+                    merged_runs[-1][1] = run[1]
+                else:
+                    merged_runs.append(run)
+
+            min_column_w = max(85, int(w_img * 0.10))
+            columns = [run for run in merged_runs if (run[1] - run[0]) >= min_column_w]
+            if len(columns) < 2:
                 continue
 
-            regions.append({
-                "bbox": [x1, y1, x2, y2],
-                "lines": [[x1, y1, x2, y2]],
-            })
+            for x1, x2 in columns:
+                pad_x = max(4, int((x2 - x1) * 0.015))
+                x1 = max(0, x1 - pad_x)
+                x2 = min(w_img, x2 + pad_x)
+                col = binary[band_y1:band_y2, x1:x2]
+                col_row_counts = np.count_nonzero(col, axis=1)
+                row_threshold = max(3, int((x2 - x1) * 0.018))
+                rows = np.where(
+                    (col_row_counts > row_threshold)
+                    & (col_row_counts < (x2 - x1) * 0.60)
+                )[0]
+                if len(rows) < 5:
+                    continue
+
+                y1 = band_y1 + int(rows[0])
+                y2 = band_y1 + int(rows[-1]) + 1
+                if (y2 - y1) < max(45, int(h_img * 0.035)):
+                    continue
+
+                regions.append({
+                    "bbox": [x1, y1, x2, y2],
+                    "lines": [[x1, y1, x2, y2]],
+                })
 
         return regions
 
@@ -672,16 +798,98 @@ class HybridOCREngine:
         kept.extend(replacements)
         return kept
 
+    def _remove_redundant_regions(
+        self,
+        regions: list[dict],
+        image_shape: tuple[int, int],
+    ) -> list[dict]:
+        """Drop tiny/one-line regions already covered by stronger text regions."""
+        if len(regions) < 2:
+            return regions
+
+        h_img, w_img = image_shape[:2]
+
+        def area(box: list[int]) -> int:
+            return max(0, box[2] - box[0]) * max(0, box[3] - box[1])
+
+        def intersection_area(a: list[int], b: list[int]) -> int:
+            ix1 = max(a[0], b[0])
+            iy1 = max(a[1], b[1])
+            ix2 = min(a[2], b[2])
+            iy2 = min(a[3], b[3])
+            return max(0, ix2 - ix1) * max(0, iy2 - iy1)
+
+        kept = []
+        for idx, region in enumerate(regions):
+            bbox = region["bbox"]
+            region_area = max(1, area(bbox))
+            line_count = len(region.get("lines", []))
+            region_width = bbox[2] - bbox[0]
+            region_height = bbox[3] - bbox[1]
+
+            if (
+                line_count <= 1
+                and region_width >= w_img * 0.60
+                and region_height <= max(24, h_img * 0.022)
+            ):
+                continue
+
+            if line_count <= 1 and region_width >= w_img * 0.55:
+                nearby_columns = 0
+                for other_idx, other in enumerate(regions):
+                    if other_idx == idx or len(other.get("lines", [])) <= 3:
+                        continue
+                    other_bbox = other["bbox"]
+                    x_overlap = max(0, min(bbox[2], other_bbox[2]) - max(bbox[0], other_bbox[0]))
+                    y_gap = other_bbox[1] - bbox[3]
+                    if x_overlap >= min(region_width, other_bbox[2] - other_bbox[0]) * 0.20 and -20 <= y_gap <= 80:
+                        nearby_columns += 1
+                if nearby_columns >= 2:
+                    continue
+
+            if line_count > 1:
+                kept.append(region)
+                continue
+
+            covered_area = 0
+            for other_idx, other in enumerate(regions):
+                if other_idx == idx or len(other.get("lines", [])) <= 1:
+                    continue
+                other_bbox = other["bbox"]
+                if area(other_bbox) <= region_area:
+                    continue
+                covered_area += intersection_area(bbox, other_bbox)
+
+            if covered_area / float(region_area) < 0.55:
+                kept.append(region)
+
+        return kept
+
     def _is_complex_layout(self, regions: list[dict], image_width: int) -> bool:
-        if len(regions) < 3:
+        if len(regions) < 2:
             return False
         narrow = [r for r in regions if (r["bbox"][2] - r["bbox"][0]) < image_width * 0.68]
         if len(narrow) < 2:
             return False
 
-        centers = sorted((r["bbox"][0] + r["bbox"][2]) / 2.0 for r in narrow)
         min_column_gap = image_width * 0.18
-        return any((b - a) >= min_column_gap for a, b in zip(centers, centers[1:]))
+        for idx, left_region in enumerate(narrow):
+            left = left_region["bbox"]
+            left_center = (left[0] + left[2]) / 2.0
+            left_h = max(1, left[3] - left[1])
+            for right_region in narrow[idx + 1:]:
+                right = right_region["bbox"]
+                right_center = (right[0] + right[2]) / 2.0
+                if abs(right_center - left_center) < min_column_gap:
+                    continue
+
+                overlap_y = max(0, min(left[3], right[3]) - max(left[1], right[1]))
+                right_h = max(1, right[3] - right[1])
+                vertical_overlap = overlap_y / float(min(left_h, right_h))
+                if vertical_overlap >= 0.20 or len(narrow) >= 3:
+                    return True
+
+        return False
 
     def _process_regions_with_tesseract(
         self,
@@ -790,24 +998,29 @@ class HybridOCREngine:
 
         # ============================================================
         # FAST PATH: Multi-PSM Tesseract
+        # --psm 3: Fully automatic segmentation (general multi-column fallback)
         # --psm 4: Single column of variable sizes (best for government letters)
         # --psm 6: Uniform block of text (good for body-heavy documents)
-        # --psm 3: Fully automatic segmentation (general fallback)
+        # --psm 11: Sparse text in no particular order (screenshots/forms)
+        # --psm 1: Automatic segmentation with orientation/script detection
         # ============================================================
         best_result = None
         best_text_len = 0
         best_conf = 0.0
         best_psm = ""
 
-        psm_modes = ["--psm 4", "--psm 6", "--psm 3", "--psm 11"]
-
-        for psm in psm_modes:
+        for psm in FAST_PATH_PSM_MODES:
             engine = TesseractOCREngine(
                 lang=self.tesseract.lang,
                 tesseract_config=psm,
                 preprocess_config=self.preprocess_config,
             )
-            result = engine.process_image(image)
+            try:
+                result = engine.process_image(image)
+            except OCRError as exc:
+                logger.warning("[Hybrid] %s failed: %s", psm, exc)
+                continue
+
             page = result["pages"][0]
             text = page["text"].strip()
             conf = page["confidence"]
@@ -820,12 +1033,6 @@ class HybridOCREngine:
                 best_text_len = len(text)
                 best_conf = conf
                 best_psm = psm
-
-            # Early exit: substantial text with good confidence — no need to try more modes
-            if len(text) > 500 and conf >= self.threshold:
-                logger.info("[Hybrid] Early exit on %s (text_len=%d > 500, conf=%.4f >= %.2f)",
-                            psm, len(text), conf, self.threshold)
-                break
 
         t_fast = time.time() - t_start
         logger.info("[Hybrid] Fast path complete in %.2fs — best_psm=%s, best_text_len=%d, best_conf=%.4f",
