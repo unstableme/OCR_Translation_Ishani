@@ -405,6 +405,7 @@ const Dashboard = () => {
     const [tamyigPreviewText, setTamyigPreviewText] = useState('');
     const [tamyigPreviewReady, setTamyigPreviewReady] = useState(false);
     const [tamyigActionMsg, setTamyigActionMsg] = useState('');
+    const [ocrDraftText, setOcrDraftText] = useState('');
 
     // Speech Synthesis State
     const [isReading, setIsReading] = useState(false);
@@ -477,6 +478,7 @@ const Dashboard = () => {
         if (useTamyigFont) return convertToTamyigUnicode(result.translated_text);
         return result.translated_text;
     }, [result?.translated_text, useRanjanaFont, useTamyigFont]);
+    const isOcrReview = result?.workflow_stage === 'ocr_review';
 
     const generateRanjanaPreview = () => {
         const normalizedText = convertFromRanjanaLegacy(inputText);
@@ -564,7 +566,9 @@ const Dashboard = () => {
 
         const text = activeTab === 'translated'
             ? result.translated_text
-            : result.extracted_text;
+            : isOcrReview
+                ? ocrDraftText
+                : result.extracted_text;
 
         if (!text) return;
 
@@ -1078,6 +1082,7 @@ const Dashboard = () => {
         if (selectedFile) {
             setFile(selectedFile);
             setResult(null);
+            setOcrDraftText('');
             setError(null);
             setUseRanjanaFont(false);
             setUseTamyigFont(false);
@@ -1113,6 +1118,7 @@ const Dashboard = () => {
             setFile(sampleFile);
             setPreviewUrl(null);
             setResult(null);
+            setOcrDraftText('');
             setUseRanjanaFont(false);
             setUseTamyigFont(false);
         } catch (err) {
@@ -1124,6 +1130,7 @@ const Dashboard = () => {
     };
 
     const handleTranslate = async () => {
+        const isFileReviewStep = inputMode === 'file' && result?.workflow_stage === 'ocr_review';
 
         // Audio mode: translate the live transcript text
         if (inputMode === 'audio') {
@@ -1158,6 +1165,10 @@ const Dashboard = () => {
             setError('Please upload a document first.');
             return;
         }
+        if (isFileReviewStep && !ocrDraftText.trim()) {
+            setError('Please review the extracted OCR text before translating.');
+            return;
+        }
         if ((inputMode === 'text' || inputMode === 'ranjana' || inputMode === 'tamyig') && !inputText.trim()) {
             setError('Please enter or paste some text to translate.');
             return;
@@ -1188,7 +1199,9 @@ const Dashboard = () => {
 
         setLoading(true);
         setError(null);
-        setResult(null);
+        if (!isFileReviewStep) {
+            setResult(null);
+        }
         setUseRanjanaFont(false);
         setUseTamyigFont(false);
 
@@ -1200,15 +1213,40 @@ const Dashboard = () => {
 
         try {
             let response;
+            let nextResult;
+            let nextTab = 'translated';
             if (inputMode === 'file') {
-                const formData = new FormData();
-                formData.append('file', file);
-                formData.append('source_lang', sourceLang);
-                formData.append('target_lang', targetLang);
-                response = await axios.post(`${API_BASE_URL}/upload`, formData, {
-                    headers: { 'Content-Type': 'multipart/form-data' },
-                    timeout: 300000,
-                });
+                if (isFileReviewStep) {
+                    response = await axios.post(`${API_BASE_URL}/translate`, {
+                        text: ocrDraftText,
+                        source_lang: sourceLang,
+                        target_lang: targetLang,
+                    }, { timeout: 300000 });
+                    nextResult = {
+                        ...result,
+                        ...response.data,
+                        extracted_text: ocrDraftText,
+                        workflow_stage: 'translated',
+                        timing: {
+                            ...(result?.timing || {}),
+                            ...(response.data.timing || {}),
+                            ocr_processing_seconds: result?.timing?.ocr_processing_seconds || 0,
+                            total_processing_seconds: Number(
+                                ((result?.timing?.ocr_processing_seconds || 0) + (response.data.timing?.total_processing_seconds || 0)).toFixed(2)
+                            ),
+                        },
+                    };
+                } else {
+                    const formData = new FormData();
+                    formData.append('file', file);
+                    response = await axios.post(`${API_BASE_URL}/ocrextraction`, formData, {
+                        headers: { 'Content-Type': 'multipart/form-data' },
+                        timeout: 300000,
+                    });
+                    nextResult = response.data;
+                    setOcrDraftText(response.data.extracted_text || '');
+                    nextTab = 'extracted';
+                }
             } else {
                 const textForTranslation = inputMode === 'ranjana'
                     ? normalizedRanjanaText
@@ -1235,9 +1273,10 @@ const Dashboard = () => {
                 if (inputMode === 'tamyig') {
                     response.data.original_tamyig_text = inputText;
                 }
+                nextResult = response.data;
             }
-            setResult(response.data);
-            setActiveTab('translated');
+            setResult(nextResult);
+            setActiveTab(nextTab);
         } catch (err) {
             console.error(err);
             setError(err.response?.data?.detail || 'An error occurred during processing.');
@@ -1322,7 +1361,9 @@ const Dashboard = () => {
                             ? convertToTamyigUnicode(result.translated_text)
                             : result.translated_text
                 )
-                : result.extracted_text;
+                : isOcrReview
+                    ? ocrDraftText
+                    : result.extracted_text;
 
             const lines = pdf.splitTextToSize(text, maxLineWidth);
 
@@ -1806,11 +1847,11 @@ const Dashboard = () => {
                             >
                                 {loading ? (
                                     <>
-                                        <RefreshCw size={18} className="spin" /> Translating...
+                                        <RefreshCw size={18} className="spin" /> {inputMode === 'file' && !isOcrReview ? 'Extracting OCR...' : 'Translating...'}
                                     </>
                                 ) : (
                                     <>
-                                        {inputMode === 'audio' ? 'Translate Transcript' : inputMode === 'file' ? 'Translate Document' : inputMode === 'ranjana' ? 'Translate Ranjana Text' : inputMode === 'tamyig' ? 'Translate Tamyig Text' : 'Translate Text'} <ArrowRight size={18} />
+                                        {inputMode === 'audio' ? 'Translate Transcript' : inputMode === 'file' ? (isOcrReview ? 'Translate Reviewed Text' : 'Extract OCR Text') : inputMode === 'ranjana' ? 'Translate Ranjana Text' : inputMode === 'tamyig' ? 'Translate Tamyig Text' : 'Translate Text'} <ArrowRight size={18} />
                                     </>
                                 )}
                             </button>
@@ -1861,20 +1902,24 @@ const Dashboard = () => {
                                     >
                                         <Download size={16} /> Download PDF
                                     </button>
-                                    <button
-                                        className={`btn ${useRanjanaFont ? 'btn-secondary' : 'btn-primary'} btn-sm`}
-                                        onClick={handleToggleRanjana}
-                                        title={useRanjanaFont ? "Show standard font" : "Convert translated text to Ranjana"}
-                                    >
-                                        <Type size={16} /> {useRanjanaFont ? "Standard Font" : "Convert to Ranjana"}
-                                    </button>
-                                    <button
-                                        className={`btn ${useTamyigFont ? 'btn-secondary' : 'btn-primary'} btn-sm`}
-                                        onClick={handleToggleTamyig}
-                                        title={useTamyigFont ? "Show standard font" : "Convert translated text to Tamyig"}
-                                    >
-                                        <Type size={16} /> {useTamyigFont ? "Standard Font" : "Convert to Tamyig"}
-                                    </button>
+                                    {!isOcrReview && (
+                                        <>
+                                            <button
+                                                className={`btn ${useRanjanaFont ? 'btn-secondary' : 'btn-primary'} btn-sm`}
+                                                onClick={handleToggleRanjana}
+                                                title={useRanjanaFont ? "Show standard font" : "Convert translated text to Ranjana"}
+                                            >
+                                                <Type size={16} /> {useRanjanaFont ? "Standard Font" : "Convert to Ranjana"}
+                                            </button>
+                                            <button
+                                                className={`btn ${useTamyigFont ? 'btn-secondary' : 'btn-primary'} btn-sm`}
+                                                onClick={handleToggleTamyig}
+                                                title={useTamyigFont ? "Show standard font" : "Convert translated text to Tamyig"}
+                                            >
+                                                <Type size={16} /> {useTamyigFont ? "Standard Font" : "Convert to Tamyig"}
+                                            </button>
+                                        </>
+                                    )}
                                 </div>
                             )}
                         </div>
@@ -1886,8 +1931,11 @@ const Dashboard = () => {
                                 <div className="result-content">
                                     <div className="tabs">
                                         <button
-                                            className={`tab ${activeTab === 'translated' ? 'active' : ''}`}
-                                            onClick={() => setActiveTab('translated')}
+                                            className={`tab ${activeTab === 'translated' ? 'active' : ''} ${isOcrReview ? 'disabled' : ''}`}
+                                            onClick={() => {
+                                                if (!isOcrReview) setActiveTab('translated');
+                                            }}
+                                            disabled={isOcrReview}
                                         >
                                             <Check size={16} /> Translated Content
                                         </button>
@@ -1902,6 +1950,13 @@ const Dashboard = () => {
                                     <div className={`text-box highlight scrollable ${activeTab === 'translated' && useRanjanaFont ? 'ranjana-text' : ''} ${activeTab === 'translated' && useTamyigFont ? 'tamyig-text' : ''}`}>
                                         {activeTab === 'translated' ? (
                                             <TypewriterText text={translatedDisplayText} />
+                                        ) : isOcrReview ? (
+                                            <textarea
+                                                className="ocr-review-field"
+                                                value={ocrDraftText}
+                                                onChange={(e) => setOcrDraftText(e.target.value)}
+                                                placeholder="Review and correct the extracted OCR text before translating..."
+                                            />
                                         ) : (
                                             result.extracted_text
                                         )}
@@ -1911,7 +1966,7 @@ const Dashboard = () => {
 
                                     <div className="result-footer">
                                         <p className="status-badge success">
-                                            <Check size={14} /> Processing Complete
+                                            <Check size={14} /> {isOcrReview ? 'OCR Ready for Review' : 'Processing Complete'}
                                         </p>
 
                                         {result.timing && (
@@ -1923,7 +1978,9 @@ const Dashboard = () => {
                                                 {result.timing.transcription_seconds > 0 && (
                                                     <span className="timing-item">Audio: <strong>{result.timing.transcription_seconds}s</strong></span>
                                                 )}
-                                                <span className="timing-item">AI: <strong>{result.timing.llm_api_response_seconds}s</strong></span>
+                                                {!isOcrReview && (
+                                                    <span className="timing-item">AI: <strong>{result.timing.llm_api_response_seconds}s</strong></span>
+                                                )}
                                                 <span className="timing-item total">Total: <strong>{result.timing.total_processing_seconds}s</strong></span>
                                             </div>
                                         )}

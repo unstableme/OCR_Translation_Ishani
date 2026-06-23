@@ -383,6 +383,157 @@ async def upload_file(
                 pass
 
 
+@app.post("/ocrextraction")
+async def ocr_extraction_only(file: UploadFile = File(...)):
+    """
+    Upload a document (image or PDF) for OCR only.
+    The extracted text can be reviewed/edited by the UI and then sent to /translate.
+    """
+    filename = file.filename or "unknown"
+    ext = Path(filename).suffix.lower()
+
+    if ext not in SUPPORTED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unsupported file type '{ext}'. "
+                f"Accepted: {sorted(SUPPORTED_EXTENSIONS)}"
+            ),
+        )
+
+    import time
+    t0 = time.time()
+    file_path = None
+
+    db = SessionLocal()
+    db_available = True
+    db_warning = None
+    try:
+        t_upload_start = time.time()
+        suffix = Path(filename).suffix
+        file_content = await file.read()
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False, dir=TEMP_PROCESSING_DIR, prefix="ocr_") as tmp:
+            tmp.write(file_content)
+            file_path = tmp.name
+
+        t_upload_end = time.time()
+        upload_duration = t_upload_end - t_upload_start
+
+        doc_id = uuid.uuid4()
+        doc = None
+        try:
+            doc = Document(
+                id=doc_id,
+                original_filename=filename,
+                stored_path=filename,
+                status="OCR Processing",
+            )
+            db.add(doc)
+            db.flush()
+        except SQLAlchemyError as exc:
+            db.rollback()
+            db_available = False
+            db_warning = "Database unavailable; OCR processed without saving records"
+            logger.warning("DB unavailable during OCR extraction init; continuing without persistence: %s", exc)
+
+        t_db_init_end = time.time()
+        db_init_duration = t_db_init_end - t_upload_end
+
+        t_ocr_start = time.time()
+        detailed_result = ocr_engine.process_detailed(file_path)
+        extracted_pages = [p["text"] for p in detailed_result["pages"]]
+        extracted_text = "\n\n".join(extracted_pages)
+        avg_confidence = (
+            sum(p["confidence"] for p in detailed_result["pages"])
+            / len(detailed_result["pages"])
+            if detailed_result["pages"] else 0.0
+        )
+        t_ocr_end = time.time()
+        ocr_duration = t_ocr_end - t_ocr_start
+
+        t_db_final_start = time.time()
+        ocr_result_id = uuid.uuid4()
+
+        if db_available:
+            try:
+                ocr_result = OCRResult(
+                    id=ocr_result_id,
+                    document_id=doc_id,
+                    extracted_text=extracted_text,
+                    confidence=avg_confidence,
+                    status="Extracted",
+                )
+                db.add(ocr_result)
+
+                if doc is not None:
+                    doc.status = "OCR Extracted"
+                db.commit()
+            except SQLAlchemyError as exc:
+                db.rollback()
+                db_available = False
+                db_warning = "Database unavailable; OCR processed without saving records"
+                logger.warning("DB unavailable during OCR extraction final save; returning unsaved result: %s", exc)
+
+        t_db_final_end = time.time()
+        db_final_duration = t_db_final_end - t_db_final_start
+        total_duration = time.time() - t0
+
+        telemetry = (
+            f"OCR TELEMETRY: Total={total_duration:.2f}s | "
+            f"Upload={upload_duration:.2f}s | "
+            f"DB_Init={db_init_duration:.2f}s | "
+            f"OCR={ocr_duration:.2f}s | "
+            f"DB_Final={db_final_duration:.2f}s"
+        )
+        logger.info(telemetry)
+        print(telemetry)
+
+        return {
+            "message": (
+                "OCR extraction completed successfully"
+                if db_available
+                else "OCR extraction completed successfully, but database save was skipped"
+            ),
+            "document_id": doc_id,
+            "ocr_result_id": ocr_result_id,
+            "persistence_status": "saved" if db_available else "skipped",
+            "warning": db_warning,
+            "extracted_text": extracted_text,
+            "translated_text": "",
+            "original_filename": filename,
+            "ocr_confidence": round(avg_confidence, 4),
+            "ocr_pages": detailed_result["pages"],
+            "ocr_strategy": detailed_result.get("ocr_strategy", "unknown"),
+            "debug_image_urls": detailed_result.get("debug_images", []),
+            "workflow_stage": "ocr_review",
+            "timing": {
+                "file_upload_seconds": round(upload_duration, 2),
+                "db_init_seconds": round(db_init_duration, 2),
+                "ocr_processing_seconds": round(ocr_duration, 2),
+                "llm_api_response_seconds": 0,
+                "db_final_seconds": round(db_final_duration, 2),
+                "total_processing_seconds": round(total_duration, 2)
+            }
+        }
+    except OCRError as e:
+        logger.error("OCR extraction failed: %s", e)
+        if db_available:
+            db.rollback()
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        logger.exception("OCR extraction processing failed")
+        if db_available:
+            db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
+        if file_path and os.path.exists(file_path):
+            try:
+                os.unlink(file_path)
+            except OSError:
+                pass
+
+
 @app.post("/upload_audio")
 async def upload_audio(
     file: UploadFile = File(...),
@@ -537,7 +688,7 @@ async def upload_audio(
 async def transcribe_audio_only(
     file: UploadFile = File(...),
     source_lang: str = Form("Nepali"),
-    force_model: str = Form(None),
+    force_model: str | None = Form(None),
 ):
     """
     Transcribe an audio file WITHOUT translation.

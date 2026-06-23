@@ -134,7 +134,7 @@ class TranscriptionService:
     # ------------------------------------------------------------------
     # Main entry point
     # ------------------------------------------------------------------
-    def transcribe(self, audio_path: str, source_language: str = "Nepali", force_model: str = None) -> Dict[str, Any]:
+    def transcribe(self, audio_path: str, source_language: str = "Nepali", force_model: str | None = None) -> Dict[str, Any]:
         t0 = time.time()
         normalized_path = None
         try:

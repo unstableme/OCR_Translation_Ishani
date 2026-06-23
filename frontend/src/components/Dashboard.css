@@ -497,6 +497,22 @@
     min-height: 200px;
 }
 
+.ocr-review-field {
+    width: 100%;
+    min-height: 260px;
+    background: transparent;
+    border: 0;
+    color: var(--text-primary);
+    font: inherit;
+    line-height: 1.65;
+    resize: vertical;
+    outline: none;
+}
+
+.ocr-review-field::placeholder {
+    color: rgba(255, 255, 255, 0.35);
+}
+
 .empty-state {
     flex: 1;
     display: flex;
@@ -539,6 +555,11 @@
 .tab.active {
     color: var(--primary);
     font-weight: 600;
+}
+
+.tab.disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
 }
 
 .tab.active::after {
