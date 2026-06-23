@@ -1,6 +1,7 @@
 import os
 import logging
 import tempfile
+import uuid
 from pathlib import Path
 from dotenv import load_dotenv, find_dotenv
 
@@ -17,6 +18,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, Form, WebSocket, W
 from fastapi.websockets import WebSocketState
 from pydantic import BaseModel
 from db.connection import engine, SessionLocal
+from sqlalchemy.exc import SQLAlchemyError
 
 from typing import Union, List
 
@@ -225,6 +227,8 @@ async def upload_file(
     file_path = None
     
     db = SessionLocal()
+    db_available = True
+    db_warning = None
     try:
         # --- 1. File Save (Temporary — cleaned up after processing) ---
         t_upload_start = time.time()
@@ -237,16 +241,24 @@ async def upload_file(
         t_upload_end = time.time()
         upload_duration = t_upload_end - t_upload_start
 
-        # Create Document object but defer final commit to reduce overhead
-        # stored_path records original filename for reference (Java/Angular stores the actual file)
-        doc = Document(
-            original_filename=filename,
-            stored_path=filename,
-            status="Processing",
-        )
-        db.add(doc)
-        db.flush() # Get the ID without full commit yet
-        doc_id = doc.id
+        doc_id = uuid.uuid4()
+        doc = None
+        try:
+            # Create Document object but defer final commit to reduce overhead
+            # stored_path records original filename for reference (Java/Angular stores the actual file)
+            doc = Document(
+                id=doc_id,
+                original_filename=filename,
+                stored_path=filename,
+                status="Processing",
+            )
+            db.add(doc)
+            db.flush() # Get the ID without full commit yet
+        except SQLAlchemyError as exc:
+            db.rollback()
+            db_available = False
+            db_warning = "Database unavailable; processed without saving records"
+            logger.warning("DB unavailable during upload init; continuing without persistence: %s", exc)
         
         t_db_init_end = time.time()
         db_init_duration = t_db_init_end - t_upload_end
@@ -275,24 +287,38 @@ async def upload_file(
 
         # --- 4. Final DB Updates (Consolidated) ---
         t_db_final_start = time.time()
-        
-        ocr_result = OCRResult(
-            document_id=doc_id,
-            extracted_text=extracted_text,
-            status="Extracted",
-        )
-        db.add(ocr_result)
 
-        translated_result = Translation(
-            document_id=doc_id,
-            translated_text=translated_text,
-            model_used=model_used,
-            status="Completed",
-        )
-        db.add(translated_result)
+        ocr_result_id = uuid.uuid4()
+        translation_id = uuid.uuid4()
 
-        doc.status = "Completed"
-        db.commit() # Single commit for all results
+        if db_available:
+            try:
+                ocr_result = OCRResult(
+                    id=ocr_result_id,
+                    document_id=doc_id,
+                    extracted_text=extracted_text,
+                    confidence=avg_confidence,
+                    status="Extracted",
+                )
+                db.add(ocr_result)
+
+                translated_result = Translation(
+                    id=translation_id,
+                    document_id=doc_id,
+                    translated_text=translated_text,
+                    model_used=model_used,
+                    status="Completed",
+                )
+                db.add(translated_result)
+
+                if doc is not None:
+                    doc.status = "Completed"
+                db.commit() # Single commit for all results
+            except SQLAlchemyError as exc:
+                db.rollback()
+                db_available = False
+                db_warning = "Database unavailable; processed without saving records"
+                logger.warning("DB unavailable during upload final save; returning unsaved result: %s", exc)
         
         t_db_final_end = time.time()
         db_final_duration = t_db_final_end - t_db_final_start
@@ -312,10 +338,16 @@ async def upload_file(
         print(telemetry) # Ensure it's visible in terminal
 
         return {
-            "message": "Document processed successfully",
+            "message": (
+                "Document processed successfully"
+                if db_available
+                else "Document processed successfully, but database save was skipped"
+            ),
             "document_id": doc_id,
-            "ocr_result_id": ocr_result.id,
-            "translation_id": translated_result.id,
+            "ocr_result_id": ocr_result_id,
+            "translation_id": translation_id,
+            "persistence_status": "saved" if db_available else "skipped",
+            "warning": db_warning,
             "extracted_text": extracted_text,
             "translated_text": translated_text,
             "original_filename": filename,
@@ -334,11 +366,13 @@ async def upload_file(
         }
     except OCRError as e:
         logger.error("OCR failed: %s", e)
-        db.rollback()
+        if db_available:
+            db.rollback()
         raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
         logger.exception("Upload processing failed")
-        db.rollback()
+        if db_available:
+            db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         db.close()

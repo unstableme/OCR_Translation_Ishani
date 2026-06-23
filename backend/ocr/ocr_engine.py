@@ -36,7 +36,6 @@ from PIL import Image as PILImage
 
 from ocr.preprocessing import (
     preprocess_pil_image,
-    preprocess_image,
     preprocess_array,
     DEFAULT_CONFIG as PREPROCESS_DEFAULT_CONFIG,
 )
@@ -54,6 +53,7 @@ PDF_SCANNER_ARTIFACT_LINES = {
     "scanned with camscanner",
     "scan with camscanner",
 }
+MIN_LAYOUT_REGION_CHARS = 80
 
 
 class OCRError(Exception):
@@ -345,7 +345,418 @@ class HybridOCREngine:
         )
         self.preprocess_config = preprocess_config
 
-    def process_image(self, image: np.ndarray) -> dict:
+    # ------------------------------------------------------------------
+    # OpenCV layout helpers
+    # ------------------------------------------------------------------
+    def _detect_text_line_boxes(self, image: np.ndarray) -> list[list[int]]:
+        """
+        Detect line-like printed-text boxes without assuming a document format.
+
+        The detector is used only for layout decisions and cropping. It favors
+        conservative text-line candidates and rejects large photo/illustration
+        regions, so clean newspaper, book, notice, and form layouts can all be
+        handled by the same downstream OCR logic.
+        """
+        h_img, w_img = image.shape[:2]
+        gray = image if len(image.shape) == 2 else cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+        binary = cv2.adaptiveThreshold(
+            blurred,
+            255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY_INV,
+            51,
+            11,
+        )
+
+        kernel_w = max(16, w_img // 90)
+        kernel_h = max(1, h_img // 700)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_w, kernel_h))
+        joined = cv2.dilate(binary, kernel, iterations=1)
+
+        contours, _ = cv2.findContours(joined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        boxes: list[list[int]] = []
+        page_area = float(h_img * w_img)
+
+        for contour in contours:
+            x, y, w, h = cv2.boundingRect(contour)
+            if w < max(24, int(w_img * 0.018)):
+                continue
+            if h < 5 or h > max(120, int(h_img * 0.12)):
+                continue
+            if (w * h) > page_area * 0.22:
+                continue
+
+            crop = binary[y:y + h, x:x + w]
+            ink_ratio = float(cv2.countNonZero(crop)) / float(max(1, w * h))
+            if ink_ratio < 0.035 or ink_ratio > 0.72:
+                continue
+
+            boxes.append([x, y, x + w, y + h])
+
+        return self._merge_nearby_boxes(boxes)
+
+    def _merge_nearby_boxes(self, boxes: list[list[int]]) -> list[list[int]]:
+        """Merge line fragments split by punctuation, short words, or ligatures."""
+        if not boxes:
+            return []
+
+        boxes = sorted(boxes, key=lambda b: (b[1], b[0]))
+        heights = [b[3] - b[1] for b in boxes]
+        median_h = float(np.median(heights)) if heights else 12.0
+        y_tol = max(6, int(median_h * 0.65))
+        x_gap_tol = max(10, int(median_h * 1.4))
+
+        merged: list[list[int]] = []
+        for box in boxes:
+            if not merged:
+                merged.append(box)
+                continue
+
+            prev = merged[-1]
+            vertical_overlap = min(prev[3], box[3]) - max(prev[1], box[1])
+            same_line = (
+                vertical_overlap >= min(prev[3] - prev[1], box[3] - box[1]) * 0.45
+                or abs(prev[1] - box[1]) <= y_tol
+            )
+            close_x = box[0] - prev[2] <= x_gap_tol
+
+            if same_line and close_x:
+                prev[0] = min(prev[0], box[0])
+                prev[1] = min(prev[1], box[1])
+                prev[2] = max(prev[2], box[2])
+                prev[3] = max(prev[3], box[3])
+            else:
+                merged.append(box)
+
+        return merged
+
+    def _group_lines_into_regions(
+        self,
+        line_boxes: list[list[int]],
+        image_shape: tuple[int, int],
+    ) -> list[dict]:
+        """Group detected text lines into OCR regions such as headings or columns."""
+        if not line_boxes:
+            return []
+
+        h_img, w_img = image_shape[:2]
+        line_boxes = sorted(line_boxes, key=lambda b: (b[1], b[0]))
+        median_h = float(np.median([b[3] - b[1] for b in line_boxes]))
+        max_vertical_gap = max(18, int(median_h * 2.7))
+        regions: list[dict] = []
+
+        def horizontal_overlap(a: list[int], b: list[int]) -> float:
+            overlap = max(0, min(a[2], b[2]) - max(a[0], b[0]))
+            return overlap / float(max(1, min(a[2] - a[0], b[2] - b[0])))
+
+        for line in line_boxes:
+            best_idx = None
+            best_score = 0.0
+            for idx, region in enumerate(regions):
+                bbox = region["bbox"]
+                vertical_gap = line[1] - bbox[3]
+                if vertical_gap < -median_h or vertical_gap > max_vertical_gap:
+                    continue
+
+                overlap = horizontal_overlap(bbox, line)
+                region_width = bbox[2] - bbox[0]
+                line_width = line[2] - line[0]
+                width_ratio = min(region_width, line_width) / float(max(region_width, line_width))
+                both_wide = region_width >= w_img * 0.62 and line_width >= w_img * 0.62
+                comparable_width = width_ratio >= 0.42
+                center_delta = abs(((line[0] + line[2]) / 2.0) - ((bbox[0] + bbox[2]) / 2.0))
+                max_center_delta = max(region_width, line_width) * 0.28
+                same_column = (
+                    (overlap >= 0.35 and (comparable_width or both_wide))
+                    or (center_delta <= max_center_delta and comparable_width)
+                )
+
+                if same_column:
+                    score = overlap + (1.0 / (1.0 + max(0, vertical_gap)))
+                    if score > best_score:
+                        best_score = score
+                        best_idx = idx
+
+            if best_idx is None:
+                regions.append({"bbox": line.copy(), "lines": [line]})
+                continue
+
+            region = regions[best_idx]
+            bbox = region["bbox"]
+            bbox[0] = min(bbox[0], line[0])
+            bbox[1] = min(bbox[1], line[1])
+            bbox[2] = max(bbox[2], line[2])
+            bbox[3] = max(bbox[3], line[3])
+            region["lines"].append(line)
+
+        filtered = []
+        for region in regions:
+            x1, y1, x2, y2 = region["bbox"]
+            width = x2 - x1
+            height = y2 - y1
+            if width < max(30, int(w_img * 0.025)) or height < 7:
+                continue
+            if width * height > h_img * w_img * 0.35:
+                continue
+            filtered.append(region)
+
+        return self._sort_regions_for_reading(filtered, w_img)
+
+    def _sort_regions_for_reading(self, regions: list[dict], page_width: int) -> list[dict]:
+        """
+        Sort OCR regions in a practical reading order.
+
+        Full-width headings/captions keep top-to-bottom order. Narrow body
+        regions are grouped into columns left-to-right, with top-to-bottom
+        order inside each column. Single-column pages naturally collapse to
+        one column.
+        """
+        if not regions:
+            return []
+
+        regions = sorted(regions, key=lambda r: (r["bbox"][1], r["bbox"][0]))
+        wide_threshold = page_width * 0.68
+        ordered: list[dict] = []
+        pending: list[dict] = []
+
+        def flush_pending():
+            if not pending:
+                return
+            columns: list[list[dict]] = []
+            for region in sorted(pending, key=lambda r: (r["bbox"][0], r["bbox"][1])):
+                rx1, _, rx2, _ = region["bbox"]
+                r_center = (rx1 + rx2) / 2.0
+                placed = False
+                for column in columns:
+                    cx1 = min(r["bbox"][0] for r in column)
+                    cx2 = max(r["bbox"][2] for r in column)
+                    c_center = (cx1 + cx2) / 2.0
+                    if abs(r_center - c_center) <= max((cx2 - cx1), (rx2 - rx1)) * 0.45:
+                        column.append(region)
+                        placed = True
+                        break
+                if not placed:
+                    columns.append([region])
+
+            columns.sort(key=lambda col: min(r["bbox"][0] for r in col))
+            for column in columns:
+                ordered.extend(sorted(column, key=lambda r: (r["bbox"][1], r["bbox"][0])))
+            pending.clear()
+
+        for region in regions:
+            x1, _, x2, _ = region["bbox"]
+            if (x2 - x1) >= wide_threshold:
+                flush_pending()
+                ordered.append(region)
+            else:
+                pending.append(region)
+        flush_pending()
+        return ordered
+
+    def _detect_layout_regions(self, image: np.ndarray) -> list[dict]:
+        line_boxes = self._detect_text_line_boxes(image)
+        regions = self._group_lines_into_regions(line_boxes, image.shape)
+        projection_regions = self._detect_projection_columns(image)
+        if len(projection_regions) >= 2:
+            regions = self._replace_overlapping_regions(regions, projection_regions)
+        return self._sort_regions_for_reading(regions, image.shape[1])
+
+    def _detect_projection_columns(self, image: np.ndarray) -> list[dict]:
+        """
+        Detect multi-column body regions using vertical whitespace gutters.
+
+        This supplements line detection for bulletin/newspaper pages where
+        same-row columns can be visually close enough to touch after dilation.
+        It is activated only when at least two substantial columns are found.
+        """
+        h_img, w_img = image.shape[:2]
+        gray = image if len(image.shape) == 2 else cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+        binary = cv2.adaptiveThreshold(
+            blurred,
+            255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY_INV,
+            51,
+            11,
+        )
+
+        body_y1 = int(h_img * 0.52)
+        body_y2 = int(h_img * 0.97)
+        if body_y2 <= body_y1:
+            return []
+
+        body = binary[body_y1:body_y2, :]
+        row_counts = np.count_nonzero(body, axis=1)
+        text_rows = row_counts < w_img * 0.45
+        if np.count_nonzero(text_rows) < 20:
+            return []
+
+        body_for_projection = body[text_rows]
+        projection = np.count_nonzero(body_for_projection, axis=0).astype(np.float32)
+        smoothed = cv2.blur(projection.reshape(1, -1), (31, 1)).ravel()
+        threshold = max(2.0, float(np.percentile(smoothed, 65)) * 0.35)
+        active = smoothed > threshold
+
+        runs: list[list[int]] = []
+        start = None
+        for idx, is_active in enumerate(active):
+            if is_active and start is None:
+                start = idx
+            elif not is_active and start is not None:
+                runs.append([start, idx])
+                start = None
+        if start is not None:
+            runs.append([start, w_img])
+
+        merged_runs: list[list[int]] = []
+        max_word_gap = max(18, int(w_img * 0.022))
+        for run in runs:
+            if merged_runs and run[0] - merged_runs[-1][1] < max_word_gap:
+                merged_runs[-1][1] = run[1]
+            else:
+                merged_runs.append(run)
+
+        columns = [
+            run for run in merged_runs
+            if (run[1] - run[0]) >= max(120, int(w_img * 0.16))
+        ]
+        if len(columns) < 2:
+            return []
+
+        regions = []
+        for x1, x2 in columns:
+            pad_x = max(4, int((x2 - x1) * 0.015))
+            x1 = max(0, x1 - pad_x)
+            x2 = min(w_img, x2 + pad_x)
+            col = binary[body_y1:body_y2, x1:x2]
+            col_row_counts = np.count_nonzero(col, axis=1)
+            row_threshold = max(3, int((x2 - x1) * 0.018))
+            rows = np.where((col_row_counts > row_threshold) & (col_row_counts < (x2 - x1) * 0.55))[0]
+            if len(rows) < 5:
+                continue
+
+            y1 = body_y1 + int(rows[0])
+            y2 = body_y1 + int(rows[-1]) + 1
+            if (y2 - y1) < max(70, int(h_img * 0.08)):
+                continue
+
+            regions.append({
+                "bbox": [x1, y1, x2, y2],
+                "lines": [[x1, y1, x2, y2]],
+            })
+
+        return regions
+
+    def _replace_overlapping_regions(
+        self,
+        regions: list[dict],
+        replacements: list[dict],
+    ) -> list[dict]:
+        def overlap_fraction(a: list[int], b: list[int]) -> float:
+            ix1 = max(a[0], b[0])
+            iy1 = max(a[1], b[1])
+            ix2 = min(a[2], b[2])
+            iy2 = min(a[3], b[3])
+            intersection = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+            area = max(1, (a[2] - a[0]) * (a[3] - a[1]))
+            return intersection / float(area)
+
+        kept = []
+        for region in regions:
+            bbox = region["bbox"]
+            if any(overlap_fraction(bbox, replacement["bbox"]) > 0.35 for replacement in replacements):
+                continue
+            kept.append(region)
+        kept.extend(replacements)
+        return kept
+
+    def _is_complex_layout(self, regions: list[dict], image_width: int) -> bool:
+        if len(regions) < 3:
+            return False
+        narrow = [r for r in regions if (r["bbox"][2] - r["bbox"][0]) < image_width * 0.68]
+        if len(narrow) < 2:
+            return False
+
+        centers = sorted((r["bbox"][0] + r["bbox"][2]) / 2.0 for r in narrow)
+        min_column_gap = image_width * 0.18
+        return any((b - a) >= min_column_gap for a, b in zip(centers, centers[1:]))
+
+    def _process_regions_with_tesseract(
+        self,
+        image: np.ndarray,
+        regions: list[dict],
+        region_source: Optional[np.ndarray] = None,
+    ) -> dict:
+        source = region_source if region_source is not None else image
+        h_img, w_img = source.shape[:2]
+
+        def _process_region(args):
+            idx, region = args
+            x1, y1, x2, y2 = region["bbox"]
+            pad_x = max(8, int((x2 - x1) * 0.025))
+            pad_y = max(6, int((y2 - y1) * 0.08))
+            x1 = max(0, x1 - pad_x)
+            y1 = max(0, y1 - pad_y)
+            x2 = min(w_img, x2 + pad_x)
+            y2 = min(h_img, y2 + pad_y)
+            if x2 <= x1 or y2 <= y1:
+                return idx, None
+
+            crop = source[y1:y2, x1:x2]
+            if region_source is not None and len(crop.shape) == 3:
+                crop = preprocess_array(crop, self.preprocess_config)
+            line_count = len(region.get("lines", []))
+            crop_height = y2 - y1
+            if line_count <= 1 and crop_height < 80:
+                psm = "--psm 7"
+            else:
+                psm = "--psm 6"
+
+            if crop.shape[0] < 45:
+                crop = cv2.resize(crop, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+                scaled = True
+            else:
+                scaled = False
+
+            engine = TesseractOCREngine(
+                lang=self.tesseract.lang,
+                tesseract_config=psm,
+                preprocess_config=self.preprocess_config,
+            )
+            region_res = engine.process_image(crop)
+            page = region_res["pages"][0]
+            if not page["text"].strip():
+                return idx, None
+
+            for box in page["boxes"]:
+                bx1, by1, bx2, by2 = box["bbox"]
+                if scaled:
+                    bx1, by1, bx2, by2 = bx1 // 2, by1 // 2, bx2 // 2, by2 // 2
+                box["bbox"] = [bx1 + x1, by1 + y1, bx2 + x1, by2 + y1]
+
+            return idx, page
+
+        max_workers = min(len(regions), 6)
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            results = list(pool.map(_process_region, enumerate(regions)))
+
+        results.sort(key=lambda item: item[0])
+        text_parts = []
+        boxes = []
+        confidences = []
+        for _, page in results:
+            if page is None:
+                continue
+            text_parts.append(page["text"].strip())
+            boxes.extend(page["boxes"])
+            confidences.append(page["confidence"])
+
+        avg_conf = sum(confidences) / len(confidences) if confidences else 0.0
+        return _make_result([_make_page_result("\n\n".join(text_parts), avg_conf, boxes)])
+
+    def process_image(self, image: np.ndarray, layout_image: Optional[np.ndarray] = None) -> dict:
         """
         Execute the primary Hybrid OCR pipeline for an image.
 
@@ -388,7 +799,7 @@ class HybridOCREngine:
         best_conf = 0.0
         best_psm = ""
 
-        psm_modes = ["--psm 4", "--psm 6", "--psm 3"]
+        psm_modes = ["--psm 4", "--psm 6", "--psm 3", "--psm 11"]
 
         for psm in psm_modes:
             engine = TesseractOCREngine(
@@ -420,8 +831,45 @@ class HybridOCREngine:
         logger.info("[Hybrid] Fast path complete in %.2fs — best_psm=%s, best_text_len=%d, best_conf=%.4f",
                     t_fast, best_psm, best_text_len, best_conf)
 
-        # Accept fast path if Tesseract extracted meaningful content
-        # For a full-page document, even partial extraction should give > 100 chars
+        # Detect printed text regions even when the global pass returned text.
+        # Multi-column pages can otherwise look "successful" while being
+        # incomplete or out of reading order.
+        layout_source = layout_image if layout_image is not None else image
+        regions = self._detect_layout_regions(layout_source)
+        complex_layout = self._is_complex_layout(regions, layout_source.shape[1])
+        logger.info(
+            "[Hybrid] OpenCV layout detected %d region(s), complex_layout=%s",
+            len(regions), complex_layout,
+        )
+
+        if regions and (complex_layout or best_conf < self.threshold):
+            layout_result = self._process_regions_with_tesseract(
+                image,
+                regions,
+                region_source=layout_source if layout_image is not None else None,
+            )
+            layout_page = layout_result["pages"][0]
+            layout_text_len = len(layout_page["text"].strip())
+            layout_conf = layout_page["confidence"]
+            logger.info(
+                "[Hybrid] Layout path: text_len=%d, conf=%.4f",
+                layout_text_len,
+                layout_conf,
+            )
+
+            if (
+                layout_text_len >= MIN_LAYOUT_REGION_CHARS
+                and (
+                    complex_layout
+                    or layout_text_len >= int(best_text_len * 1.08)
+                    or layout_conf >= best_conf
+                )
+            ):
+                layout_result["ocr_strategy"] = "opencv_layout_tesseract"
+                return layout_result
+
+        # Accept fast path if Tesseract extracted meaningful content and the
+        # page does not appear to need regional layout handling.
         if best_text_len > 100:
             logger.info("[Hybrid] Fast path ACCEPTED (text_len=%d > 100, psm=%s)",
                         best_text_len, best_psm)
@@ -556,9 +1004,11 @@ class HybridOCREngine:
         pages = []
         strategies = []
         for idx, pil_img in enumerate(images):
+            page_rgb = np.array(pil_img.convert("RGB"))
+            page_bgr = cv2.cvtColor(page_rgb, cv2.COLOR_RGB2BGR)
             preprocessed = preprocess_pil_image(pil_img, cfg)
             
-            result = self.process_image(preprocessed)
+            result = self.process_image(preprocessed, layout_image=page_bgr)
             strategy = result.get("ocr_strategy")
             if strategy:
                 strategies.append(strategy)
@@ -691,8 +1141,11 @@ class OCREngine:
 
         # Image
         logger.info("Processing image: %s", file_path)
-        preprocessed = preprocess_image(str(path), self.preprocess_config)
-        result = self._hybrid.process_image(preprocessed)
+        original = cv2.imread(str(path))
+        if original is None:
+            raise OCRError(f"Could not read image from path: {file_path}")
+        preprocessed = preprocess_array(original, self.preprocess_config)
+        result = self._hybrid.process_image(preprocessed, layout_image=original)
 
         return [p["text"] for p in result["pages"]]
 
@@ -748,8 +1201,11 @@ class OCREngine:
             return result
 
         # Image
-        preprocessed = preprocess_image(str(path), self.preprocess_config)
-        result = self._hybrid.process_image(preprocessed)
+        original = cv2.imread(str(path))
+        if original is None:
+            raise OCRError(f"Could not read image from path: {file_path}")
+        preprocessed = preprocess_array(original, self.preprocess_config)
+        result = self._hybrid.process_image(preprocessed, layout_image=original)
         
         return result
 

@@ -5,6 +5,8 @@ __pycache__/
 backend/venv/
 .env
 .pytest_cache/
+pyrightconfig.json
+backend/pyrightconfig.json
 
 # Node.js (Frontend)
 frontend/node_modules/
@@ -37,9 +39,11 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+WhatsApp Image*
 
 # Project Specific
 tmp/
+uploads/
 backend/uploads/
 !backend/uploads/.gitkeep
 backend/debug_preprocessing/

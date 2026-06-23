@@ -41,6 +41,200 @@ const LOADING_MESSAGES = [
     "Finalizing your results..."
 ];
 
+const RANJANA_BASE_MAP = {
+    "अ": "c", "आ": "cf", "इ": "O", "ई": "O{", "उ": "p", "ऊ": "pm", "ऋ": "C",
+    "ए": "P", "ऐ": "P]", "ओ": "cf]", "औ": "cf}", "क": "s", "ख": "v", "ग": "u",
+    "घ": "3", "ङ": "ª", "च": "r", "छ": "5", "ज": "h", "झ": "em", "ञ": "`",
+    "ट": "6", "ठ": "7", "ड": "8", "ढ": "9", "ण": "0f", "त": "t", "थ": "y",
+    "द": "b", "ध": "w", "न": "g", "प": "k", "फ": "km", "ब": "a", "भ": "e",
+    "म": "d", "य": "o", "र": "/", "ल": "n", "व": "j", "श": "z", "ष": "if",
+    "स": ";", "ह": "x", "क्ष": "If", "त्र": "q", "ज्ञ": "1", "श्र": ">", "।": ".",
+    "०": ")", "१": "!", "२": "@", "३": "#", "४": "$", "५": "%", "६": "^",
+    "७": "&", "८": "*", "९": "(",
+};
+
+const RANJANA_MARK_MAP = {
+    "ा": "f", "ी": "L", "ु": "'", "ू": "\"", "ृ": "[", "े": "]", "ै": "}",
+    "ो": "f]", "ौ": "f}", "ं": "+", "ः": "M", "ँ": "F", "्": "",
+};
+
+const RANJANA_SPECIAL_CLUSTERS = ["क्ष", "त्र", "ज्ञ", "श्र"];
+const RANJANA_BASE_FROM_LEGACY = Object.entries(RANJANA_BASE_MAP)
+    .sort(([, a], [, b]) => b.length - a.length)
+    .map(([devanagari, legacy]) => ({ legacy, devanagari }));
+const RANJANA_MARK_FROM_LEGACY = Object.entries(RANJANA_MARK_MAP)
+    .filter(([, legacy]) => legacy)
+    .sort(([, a], [, b]) => b.length - a.length)
+    .map(([devanagari, legacy]) => ({ legacy, devanagari }));
+const DEVANAGARI_PATTERN = /[\u0900-\u097F]/;
+
+const TAMYIG_BASE_MAP = {
+    "अ": "ཨ", "आ": "ཨཱ", "इ": "ཨི", "ई": "ཨཱི", "उ": "ཨུ", "ऊ": "ཨཱུ",
+    "ए": "ཨེ", "ऐ": "ཨཻ", "ओ": "ཨོ", "औ": "ཨཽ",
+    "क": "ཀ", "ख": "ཁ", "ग": "ག", "घ": "གྷ", "ङ": "ང",
+    "च": "ཅ", "छ": "ཆ", "ज": "ཇ", "झ": "ཇྷ", "ञ": "ཉ",
+    "ट": "ཊ", "ठ": "ཋ", "ड": "ཌ", "ढ": "ཌྷ", "ण": "ཎ",
+    "त": "ཏ", "थ": "ཐ", "द": "ད", "ध": "དྷ", "न": "ན",
+    "प": "པ", "फ": "ཕ", "ब": "བ", "भ": "བྷ", "म": "མ",
+    "य": "ཡ", "र": "ར", "ल": "ལ", "व": "ཝ",
+    "श": "ཤ", "ष": "ཥ", "स": "ས", "ह": "ཧ",
+    "क़": "ཀ", "ख़": "ཁ", "ग़": "ག", "ज़": "ཛ", "ड़": "ཌ", "ढ़": "ཌྷ", "फ़": "ཕ",
+};
+
+const TAMYIG_SUBJOINED_MAP = {
+    "क": "ྐ", "ख": "ྑ", "ग": "ྒ", "ङ": "ྔ",
+    "च": "ྕ", "छ": "ྖ", "ज": "ྗ", "ञ": "ྙ",
+    "ट": "ྚ", "ठ": "ྛ", "ड": "ྜ", "ण": "ྞ",
+    "त": "ྟ", "थ": "ྠ", "द": "ྡ", "न": "ྣ",
+    "प": "ྤ", "फ": "ྥ", "ब": "ྦ", "म": "ྨ",
+    "य": "ྱ", "र": "ྲ", "ल": "ླ",
+    "श": "ྴ", "ष": "ྵ", "स": "ྶ", "ह": "ྷ",
+};
+
+const TAMYIG_MARK_MAP = {
+    "ा": "ཱ", "ि": "ི", "ी": "ཱི", "ु": "ུ", "ू": "ཱུ", "ृ": "ྲྀ",
+    "े": "ེ", "ै": "ཻ", "ो": "ོ", "ौ": "ཽ", "ं": "ཾ", "ः": "ཿ", "ँ": "ྃ",
+};
+
+const TAMYIG_DIGIT_MAP = {
+    "०": "༠", "१": "༡", "२": "༢", "३": "༣", "४": "༤",
+    "५": "༥", "६": "༦", "७": "༧", "८": "༨", "९": "༩",
+};
+
+const TAMYIG_PUNCTUATION_MAP = {
+    "।": "།", "॥": "༎",
+};
+
+const convertToTamyigUnicode = (value) => {
+    const text = Array.isArray(value) ? value.join("\n\n") : String(value || "");
+    let output = "";
+
+    for (let i = 0; i < text.length; i += 1) {
+        const twoCharToken = text.slice(i, i + 2);
+        if (TAMYIG_PUNCTUATION_MAP[twoCharToken]) {
+            output += TAMYIG_PUNCTUATION_MAP[twoCharToken];
+            i += 1;
+            continue;
+        }
+
+        const char = text[i];
+        if (TAMYIG_DIGIT_MAP[char]) {
+            output += TAMYIG_DIGIT_MAP[char];
+            continue;
+        }
+        if (TAMYIG_PUNCTUATION_MAP[char]) {
+            output += TAMYIG_PUNCTUATION_MAP[char];
+            continue;
+        }
+
+        const base = TAMYIG_BASE_MAP[char];
+        if (!base) {
+            output += TAMYIG_MARK_MAP[char] ?? char;
+            continue;
+        }
+
+        output += base;
+
+        while (text[i + 1] === "्" && TAMYIG_SUBJOINED_MAP[text[i + 2]]) {
+            output += TAMYIG_SUBJOINED_MAP[text[i + 2]];
+            i += 2;
+        }
+
+        if (TAMYIG_MARK_MAP[text[i + 1]]) {
+            output += TAMYIG_MARK_MAP[text[i + 1]];
+            i += 1;
+        }
+    }
+
+    return output;
+};
+
+const convertToRanjanaLegacy = (value) => {
+    const text = Array.isArray(value) ? value.join("\n\n") : String(value || "");
+    let output = "";
+
+    for (let i = 0; i < text.length; i += 1) {
+        const twoCharCluster = text.slice(i, i + 2);
+        const threeCharCluster = text.slice(i, i + 3);
+        const cluster = RANJANA_SPECIAL_CLUSTERS.find((item) => (
+            threeCharCluster === item || twoCharCluster === item
+        ));
+
+        if (cluster) {
+            const next = text[i + cluster.length];
+            output += next === "ि"
+                ? `l${RANJANA_BASE_MAP[cluster]}`
+                : RANJANA_BASE_MAP[cluster];
+            if (next === "ि") i += 1;
+            i += cluster.length - 1;
+            continue;
+        }
+
+        const char = text[i];
+        const next = text[i + 1];
+
+        if (RANJANA_BASE_MAP[char]) {
+            output += next === "ि" ? `l${RANJANA_BASE_MAP[char]}` : RANJANA_BASE_MAP[char];
+            if (next === "ि") i += 1;
+            continue;
+        }
+
+        output += RANJANA_MARK_MAP[char] ?? char;
+    }
+
+    return output;
+};
+
+const findRanjanaToken = (tokens, text, index) => (
+    tokens.find(({ legacy }) => text.startsWith(legacy, index))
+);
+
+const convertFromRanjanaLegacy = (value) => {
+    const text = Array.isArray(value) ? value.join("\n\n") : String(value || "");
+    if (DEVANAGARI_PATTERN.test(text)) return text;
+
+    let output = "";
+    let pendingShortI = false;
+
+    for (let i = 0; i < text.length;) {
+        if (text[i] === "l") {
+            pendingShortI = true;
+            i += 1;
+            continue;
+        }
+
+        const baseToken = findRanjanaToken(RANJANA_BASE_FROM_LEGACY, text, i);
+        if (baseToken) {
+            output += baseToken.devanagari;
+            i += baseToken.legacy.length;
+
+            if (pendingShortI) {
+                output += "ि";
+                pendingShortI = false;
+            }
+
+            while (i < text.length) {
+                const markToken = findRanjanaToken(RANJANA_MARK_FROM_LEGACY, text, i);
+                if (!markToken) break;
+                output += markToken.devanagari;
+                i += markToken.legacy.length;
+            }
+            continue;
+        }
+
+        if (pendingShortI) {
+            output += "ि";
+            pendingShortI = false;
+        }
+
+        output += text[i];
+        i += 1;
+    }
+
+    if (pendingShortI) output += "ि";
+    return output;
+};
+
 
 
 const LoadingState = () => {
@@ -120,16 +314,21 @@ const Dashboard = () => {
     const [activeTab, setActiveTab] = useState('translated'); // 'extracted' | 'translated'
     const [sourceLang, setSourceLang] = useState('Tamang/Newari');
     const [targetLang, setTargetLang] = useState('Nepali');
-    const [inputMode, setInputMode] = useState('file'); // 'file' | 'text'
+    const [inputMode, setInputMode] = useState('file'); // 'file' | 'text' | 'ranjana' | 'audio'
     const [inputText, setInputText] = useState('');
     const [cameraMode, setCameraMode] = useState(false);
+    const [useRanjanaFont, setUseRanjanaFont] = useState(false);
+    const [useTamyigFont, setUseTamyigFont] = useState(false);
+    const [ranjanaPreviewText, setRanjanaPreviewText] = useState('');
+    const [ranjanaPreviewReady, setRanjanaPreviewReady] = useState(false);
+    const [ranjanaActionMsg, setRanjanaActionMsg] = useState('');
 
     // Speech Synthesis State
     const [isReading, setIsReading] = useState(false);
 
     // Audio State
     const [isRecording, setIsRecording] = useState(false);
-    const [audioBlob, setAudioBlob] = useState(null);
+    const [, setAudioBlob] = useState(null);
     const [recordingTime, setRecordingTime] = useState(0);
     const mediaRecorderRef = useRef(null);
     const audioChunksRef = useRef([]);
@@ -165,7 +364,7 @@ const Dashboard = () => {
         fetchModels();
     }, []);
 
-    const [activeProvider, setActiveProvider] = useState(''); // e.g., 'Chrome Native', 'Groq Whisper'
+    const [, setActiveProvider] = useState(''); // e.g., 'Chrome Native', 'Groq Whisper'
     const [nativeSpeechLang, setNativeSpeechLang] = useState('ne-NP'); // 'ne-NP' | 'en-US' | 'hi-IN'
     const recognitionRef = useRef(null);
 
@@ -188,6 +387,42 @@ const Dashboard = () => {
     const videoRef = useRef(null);
     const streamRef = useRef(null);
     const resultsRef = useRef(null);
+
+    const translatedDisplayText = React.useMemo(() => {
+        if (!result?.translated_text) return "";
+        if (useRanjanaFont) return convertToRanjanaLegacy(result.translated_text);
+        if (useTamyigFont) return convertToTamyigUnicode(result.translated_text);
+        return result.translated_text;
+    }, [result?.translated_text, useRanjanaFont, useTamyigFont]);
+
+    const generateRanjanaPreview = () => {
+        const normalizedText = convertFromRanjanaLegacy(inputText);
+        setRanjanaPreviewText(normalizedText);
+        setRanjanaPreviewReady(true);
+    };
+
+    const handleRanjanaInputChange = (value) => {
+        setInputText(value);
+        setRanjanaPreviewReady(false);
+        setRanjanaPreviewText('');
+        setRanjanaActionMsg('');
+    };
+
+    const encodeDevanagariInputAsRanjana = () => {
+        const encodedText = convertToRanjanaLegacy(inputText);
+        setInputText(encodedText);
+        setRanjanaPreviewText('');
+        setRanjanaPreviewReady(false);
+        setRanjanaActionMsg('Encoded for the Ranjana font. Click preview to verify.');
+    };
+
+    const copyRanjanaEncodedText = async () => {
+        const encodedText = DEVANAGARI_PATTERN.test(inputText)
+            ? convertToRanjanaLegacy(inputText)
+            : inputText;
+        await navigator.clipboard.writeText(encodedText);
+        setRanjanaActionMsg('Ranjana encoded text copied.');
+    };
 
     useEffect(() => {
         return () => {
@@ -299,16 +534,6 @@ const Dashboard = () => {
         return selectedModel?.modelName || selectedModel?.value || selectedEngine;
     };
 
-    const getProviderClass = () => {
-        if (!activeProvider) return '';
-        const prov = activeProvider.toLowerCase();
-        if (prov.includes('native')) return 'prov-native';
-        if (prov.includes('groq')) return 'prov-groq';
-        if (prov.includes('deepgram')) return 'prov-deepgram';
-        if (prov.includes('local')) return 'prov-local';
-        return '';
-    };
-
     const fallbackToWebSocket = async () => {
         if (fallbackCalledRef.current) return;
         fallbackCalledRef.current = true;
@@ -379,7 +604,9 @@ const Dashboard = () => {
                         setError(`Transcription Fallback Error: ${msg.message}`);
                         setLiveStatus('error');
                     }
-                } catch (_) { }
+                } catch (err) {
+                    console.warn("Failed to parse transcription message:", err);
+                }
             };
 
             ws.onerror = () => {
@@ -583,7 +810,9 @@ const Dashboard = () => {
                             setError(`Transcription: ${msg.message}`);
                             setLiveStatus('error');
                         }
-                    } catch (_) { }
+                    } catch (err) {
+                        console.warn("Failed to parse transcription message:", err);
+                    }
                 };
 
                 ws.onerror = () => {
@@ -662,7 +891,9 @@ const Dashboard = () => {
         if (recognitionRef.current) {
             try {
                 recognitionRef.current.abort();
-            } catch (e) { }
+            } catch (err) {
+                console.warn("Error aborting speech recognition:", err);
+            }
             recognitionRef.current = null;
         }
 
@@ -730,6 +961,8 @@ const Dashboard = () => {
             setFile(selectedFile);
             setResult(null);
             setError(null);
+            setUseRanjanaFont(false);
+            setUseTamyigFont(false);
 
             // Preview logic
             if (selectedFile.type.startsWith('image/')) {
@@ -762,6 +995,8 @@ const Dashboard = () => {
             setFile(sampleFile);
             setPreviewUrl(null);
             setResult(null);
+            setUseRanjanaFont(false);
+            setUseTamyigFont(false);
         } catch (err) {
             console.error(err);
             setError(`Could not load ${sampleName} document.`);
@@ -781,6 +1016,8 @@ const Dashboard = () => {
             setLoading(true);
             setError(null);
             setResult(null);
+            setUseRanjanaFont(false);
+            setUseTamyigFont(false);
             try {
                 const response = await axios.post(`${API_BASE_URL}/translate`, {
                     text: transcript,
@@ -807,10 +1044,24 @@ const Dashboard = () => {
             setError('Please enter or paste some text to translate.');
             return;
         }
+        const normalizedRanjanaText = inputMode === 'ranjana'
+            ? (ranjanaPreviewReady ? ranjanaPreviewText : convertFromRanjanaLegacy(inputText))
+            : "";
+
+        if (inputMode === 'ranjana' && !normalizedRanjanaText.trim()) {
+            setError('Please paste Ranjana text to convert and translate.');
+            return;
+        }
+        if (inputMode === 'ranjana' && !ranjanaPreviewReady) {
+            setRanjanaPreviewText(normalizedRanjanaText);
+            setRanjanaPreviewReady(true);
+        }
 
         setLoading(true);
         setError(null);
         setResult(null);
+        setUseRanjanaFont(false);
+        setUseTamyigFont(false);
 
         if (window.innerWidth <= 768) {
             setTimeout(() => {
@@ -830,12 +1081,22 @@ const Dashboard = () => {
                     timeout: 300000,
                 });
             } else {
+                const textForTranslation = inputMode === 'ranjana'
+                    ? normalizedRanjanaText
+                    : inputText;
+                const sourceForTranslation = inputMode === 'ranjana' && sourceLang === 'Tamang/Newari'
+                    ? 'Newari'
+                    : sourceLang;
+
                 response = await axios.post(`${API_BASE_URL}/translate`, {
-                    text: inputText,
-                    source_lang: sourceLang,
+                    text: textForTranslation,
+                    source_lang: sourceForTranslation,
                     target_lang: targetLang,
                 }, { timeout: 300000 });
-                response.data.extracted_text = inputText;
+                response.data.extracted_text = textForTranslation;
+                if (inputMode === 'ranjana') {
+                    response.data.original_ranjana_text = inputText;
+                }
             }
             setResult(response.data);
             setActiveTab('translated');
@@ -848,7 +1109,34 @@ const Dashboard = () => {
     };
 
 
-    const handleDownloadPDF = () => {
+    const handleToggleRanjana = () => {
+        setActiveTab('translated');
+        setUseRanjanaFont((current) => {
+            const next = !current;
+            if (next) setUseTamyigFont(false);
+            return next;
+        });
+    };
+
+    const handleToggleTamyig = () => {
+        setActiveTab('translated');
+        setUseTamyigFont((current) => {
+            const next = !current;
+            if (next) setUseRanjanaFont(false);
+            return next;
+        });
+    };
+
+    const toBase64 = (arrayBuffer) => {
+        const bytes = new Uint8Array(arrayBuffer);
+        let binary = "";
+        bytes.forEach((byte) => {
+            binary += String.fromCharCode(byte);
+        });
+        return window.btoa(binary);
+    };
+
+    const handleDownloadPDF = async () => {
         if (!result) return;
 
         try {
@@ -858,10 +1146,27 @@ const Dashboard = () => {
                 format: "a4",
             });
 
-            // Register font
-            pdf.addFileToVFS("NotoSansDevanagari.ttf", notoDevanagari);
-            pdf.addFont("NotoSansDevanagari.ttf", "NotoSans", "normal");
-            pdf.setFont("NotoSans");
+            const shouldUseRanjanaPdf = activeTab === "translated" && useRanjanaFont;
+            const shouldUseTamyigPdf = activeTab === "translated" && useTamyigFont;
+            if (shouldUseRanjanaPdf) {
+                const fontResponse = await fetch("/nithya-ranjana.otf");
+                if (!fontResponse.ok) throw new Error("Ranjana font could not be loaded.");
+                const ranjanaBase64 = toBase64(await fontResponse.arrayBuffer());
+                pdf.addFileToVFS("nithya-ranjana.otf", ranjanaBase64);
+                pdf.addFont("nithya-ranjana.otf", "Ranjana", "normal");
+                pdf.setFont("Ranjana");
+            } else if (shouldUseTamyigPdf) {
+                const fontResponse = await fetch("/monlam-uni-ouchan5.ttf");
+                if (!fontResponse.ok) throw new Error("Tamyig font could not be loaded.");
+                const tamyigBase64 = toBase64(await fontResponse.arrayBuffer());
+                pdf.addFileToVFS("monlam-uni-ouchan5.ttf", tamyigBase64);
+                pdf.addFont("monlam-uni-ouchan5.ttf", "Tamyig", "normal");
+                pdf.setFont("Tamyig");
+            } else {
+                pdf.addFileToVFS("NotoSansDevanagari.ttf", notoDevanagari);
+                pdf.addFont("NotoSansDevanagari.ttf", "NotoSans", "normal");
+                pdf.setFont("NotoSans");
+            }
 
             pdf.setFontSize(12);
             pdf.setTextColor(0, 0, 0);
@@ -872,7 +1177,13 @@ const Dashboard = () => {
             const maxLineWidth = pageWidth - margin * 2;
 
             const text = activeTab === "translated"
-                ? result.translated_text
+                ? (
+                    useRanjanaFont
+                        ? convertToRanjanaLegacy(result.translated_text)
+                        : useTamyigFont
+                            ? convertToTamyigUnicode(result.translated_text)
+                            : result.translated_text
+                )
                 : result.extracted_text;
 
             const lines = pdf.splitTextToSize(text, maxLineWidth);
@@ -973,6 +1284,12 @@ const Dashboard = () => {
                                     onClick={() => setInputMode('text')}
                                 >
                                     <Type size={16} /> Text Input
+                                </button>
+                                <button
+                                    className={`mode-btn ${inputMode === 'ranjana' ? 'active' : ''}`}
+                                    onClick={() => setInputMode('ranjana')}
+                                >
+                                    <Type size={16} /> Ranjana Text
                                 </button>
                                 <button
                                     className={`mode-btn ${inputMode === 'audio' ? 'active' : ''}`}
@@ -1180,16 +1497,88 @@ const Dashboard = () => {
                             ) : (
                                 <div className="text-input-container">
                                     <textarea
-                                        className="text-input-field"
-                                        placeholder="Paste your Tamang or Newari text here..."
+                                        className={`text-input-field ${inputMode === 'ranjana' ? 'ranjana-input-field' : ''}`}
+                                        placeholder={inputMode === 'ranjana' ? "Paste Ranjana text here..." : "Paste your Tamang or Newari text here..."}
                                         value={inputText}
-                                        onChange={(e) => setInputText(e.target.value)}
+                                        onChange={(e) => {
+                                            if (inputMode === 'ranjana') {
+                                                handleRanjanaInputChange(e.target.value);
+                                            } else {
+                                                setInputText(e.target.value);
+                                            }
+                                        }}
                                     ></textarea>
+                                    {inputMode === 'ranjana' && (
+                                        <div className="ranjana-preview-panel">
+                                            <div className="ranjana-preview-header">
+                                                <span>Devanagari Preview</span>
+                                                <div className="ranjana-preview-actions">
+                                                    {DEVANAGARI_PATTERN.test(inputText) && (
+                                                        <button
+                                                            className="btn btn-secondary btn-xs"
+                                                            onClick={encodeDevanagariInputAsRanjana}
+                                                            disabled={!inputText.trim()}
+                                                            title="Convert copied Devanagari into Ranjana font encoding"
+                                                        >
+                                                            <Type size={14} /> Encode as Ranjana
+                                                        </button>
+                                                    )}
+                                                    <button
+                                                        className="btn btn-primary btn-xs"
+                                                        onClick={generateRanjanaPreview}
+                                                        disabled={!inputText.trim()}
+                                                        title="Show equivalent Devanagari"
+                                                    >
+                                                        <Type size={14} /> See equivalent Devanagari
+                                                    </button>
+                                                    <button
+                                                        className="btn btn-ghost btn-xs"
+                                                        onClick={() => handleRanjanaInputChange('')}
+                                                        disabled={!inputText}
+                                                        title="Clear Ranjana input"
+                                                    >
+                                                        <Trash2 size={14} /> Clear
+                                                    </button>
+                                                    <button
+                                                        className="btn btn-ghost btn-xs"
+                                                        onClick={copyRanjanaEncodedText}
+                                                        disabled={!inputText.trim()}
+                                                        title="Copy legacy Ranjana font-code text"
+                                                    >
+                                                        <FileText size={14} /> Copy Ranjana
+                                                    </button>
+                                                </div>
+                                            </div>
+                                            {ranjanaActionMsg && (
+                                                <div className="ranjana-action-note">{ranjanaActionMsg}</div>
+                                            )}
+                                            <div className="ranjana-preview-box">
+                                                {ranjanaPreviewReady
+                                                    ? (ranjanaPreviewText || "No convertible text found.")
+                                                    : "Click the button above to show equivalent Devanagari."}
+                                            </div>
+                                        </div>
+                                    )}
                                     <div className="input-footer">
-                                        <span>Character count: {inputText.length}</span>
+                                        <span>
+                                            {inputMode === 'ranjana'
+                                                ? `Ranjana characters: ${inputText.length}`
+                                                : `Character count: ${inputText.length}`}
+                                        </span>
                                         <span className="sample-hint" style={{ border: 'none', width: 'auto', padding: 0 }}>
                                             Need a sample?
-                                            <span className="sample-link" onClick={() => setInputText('छ्याल्हाबा, खन्ता बा तबा मुला?')}> Tamang</span>
+                                            <span
+                                                className="sample-link"
+                                                onClick={() => {
+                                                    if (inputMode === 'ranjana') {
+                                                        handleRanjanaInputChange(convertToRanjanaLegacy('नेपाल भाषा'));
+                                                    } else {
+                                                        setInputText('छ्याल्हाबा, खन्ता बा तबा मुला?');
+                                                    }
+                                                }}
+                                            >
+                                                {inputMode === 'ranjana' ? ' Ranjana' : ' Tamang'}
+                                            </span>
                                         </span>
                                     </div>
                                 </div>
@@ -1214,7 +1603,7 @@ const Dashboard = () => {
                                     </>
                                 ) : (
                                     <>
-                                        {inputMode === 'audio' ? 'Translate Transcript' : inputMode === 'file' ? 'Translate Document' : 'Translate Text'} <ArrowRight size={18} />
+                                        {inputMode === 'audio' ? 'Translate Transcript' : inputMode === 'file' ? 'Translate Document' : inputMode === 'ranjana' ? 'Translate Ranjana Text' : 'Translate Text'} <ArrowRight size={18} />
                                     </>
                                 )}
                             </button>
@@ -1265,6 +1654,20 @@ const Dashboard = () => {
                                     >
                                         <Download size={16} /> Download PDF
                                     </button>
+                                    <button
+                                        className={`btn ${useRanjanaFont ? 'btn-secondary' : 'btn-primary'} btn-sm`}
+                                        onClick={handleToggleRanjana}
+                                        title={useRanjanaFont ? "Show standard font" : "Convert translated text to Ranjana"}
+                                    >
+                                        <Type size={16} /> {useRanjanaFont ? "Standard Font" : "Convert to Ranjana"}
+                                    </button>
+                                    <button
+                                        className={`btn ${useTamyigFont ? 'btn-secondary' : 'btn-primary'} btn-sm`}
+                                        onClick={handleToggleTamyig}
+                                        title={useTamyigFont ? "Show standard font" : "Convert translated text to Tamyig"}
+                                    >
+                                        <Type size={16} /> {useTamyigFont ? "Standard Font" : "Convert to Tamyig"}
+                                    </button>
                                 </div>
                             )}
                         </div>
@@ -1285,13 +1688,13 @@ const Dashboard = () => {
                                             className={`tab ${activeTab === 'extracted' ? 'active' : ''}`}
                                             onClick={() => setActiveTab('extracted')}
                                         >
-                                            <FileText size={16} /> {inputMode === 'audio' ? 'Transcript' : 'Original Text'}
+                                            <FileText size={16} /> {inputMode === 'audio' ? 'Transcript' : inputMode === 'ranjana' ? 'Normalized Source' : 'Original Text'}
                                         </button>
                                     </div>
 
-                                    <div className="text-box highlight scrollable">
+                                    <div className={`text-box highlight scrollable ${activeTab === 'translated' && useRanjanaFont ? 'ranjana-text' : ''} ${activeTab === 'translated' && useTamyigFont ? 'tamyig-text' : ''}`}>
                                         {activeTab === 'translated' ? (
-                                            <TypewriterText text={result.translated_text} />
+                                            <TypewriterText text={translatedDisplayText} />
                                         ) : (
                                             result.extracted_text
                                         )}
@@ -1327,7 +1730,9 @@ const Dashboard = () => {
                                             ? 'Record audio, edit the transcript, then click "Translate Transcript" to see results here.'
                                             : inputMode === 'file'
                                                 ? 'Upload a document to see the translation results here.'
-                                                : 'Enter text and click translate to see the results here.'}
+                                                : inputMode === 'ranjana'
+                                                    ? 'Paste Ranjana text, review the Devanagari preview, then translate.'
+                                                    : 'Enter text and click translate to see the results here.'}
                                     </p>
                                 </div>
                             )}
