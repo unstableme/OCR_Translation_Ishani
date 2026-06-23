@@ -283,7 +283,7 @@ def _build_compact_context(text: str, chunks: list[str], max_chars: int = 1800) 
     return f"{cleaned[:half]} ... {cleaned[-half:]}"
 
 
-def _call_llm(text: str, source_lang: str, target_lang: str, full_context: str = None) -> tuple[str, str]:
+def _call_llm(text: str, source_lang: str, target_lang: str, full_context: str | None = None) -> tuple[str, str]:
     """Helper for a single LLM call with context-awareness for chunked processing."""
     if not text.strip():
         return "", MODEL
@@ -385,7 +385,10 @@ Output Requirements:
                     temperature=0.0,
                 )
             )
-            return response.text.strip(), model_name
+            text_result = response.text
+            if not text_result:
+                raise ValueError("Empty response text (possible safety block)")
+            return text_result.strip(), model_name
         except Exception as e:
             last_error = e
             print(f"LLM Error with {model_name}: {e}. Trying next model...")
@@ -395,7 +398,7 @@ Output Requirements:
     return text, MODEL
 
 
-def translate_parallel_chunks(chunks: list[str], source_lang: str, target_lang: str, return_list: bool = False, full_context: str = None) -> tuple[str | list[str], str]:
+def translate_parallel_chunks(chunks: list[str], source_lang: str, target_lang: str, return_list: bool = False, full_context: str | None = None) -> tuple[str | list[str], str]:
     """Translates multiple chunks/pages in parallel to hit the < 5s target."""
     from concurrent.futures import ThreadPoolExecutor
 
@@ -479,10 +482,16 @@ Rules:
                 )
             )
             if response.parsed:
-                return response.parsed.model_dump()
+                if isinstance(response.parsed, BaseModel):
+                    return response.parsed.model_dump()
+                elif isinstance(response.parsed, dict):
+                    return response.parsed
             else:
                 import json
-                return json.loads(response.text.strip())
+                text_result = response.text
+                if not text_result:
+                    raise ValueError("Empty response text (possible safety block)")
+                return json.loads(text_result.strip())
         except Exception as e:
             last_error = e
             print(f"Language detection failed with {model_name}: {e}. Trying next model...")
