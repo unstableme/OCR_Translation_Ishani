@@ -288,6 +288,15 @@ def _call_llm(text: str, source_lang: str, target_lang: str, full_context: str |
     if not text.strip():
         return "", MODEL
 
+    request_started = time.time()
+    input_words = len(text.split())
+    context_chars = len(full_context or "")
+    print(
+        "LLM request start: "
+        f"source={source_lang}, target={target_lang}, "
+        f"chars={len(text)}, words={input_words}, context_chars={context_chars}"
+    )
+
     target_guard = _target_language_guard(target_lang)
 
     if full_context:
@@ -376,6 +385,7 @@ Output Requirements:
     ]
     last_error = None
     for model_name in models_to_try:
+        model_started = time.time()
         try:
             response = gemini_client.models.generate_content(
                 model=model_name,
@@ -388,10 +398,21 @@ Output Requirements:
             text_result = response.text
             if not text_result:
                 raise ValueError("Empty response text (possible safety block)")
+            model_duration = time.time() - model_started
+            total_duration = time.time() - request_started
+            print(
+                "LLM request complete: "
+                f"model={model_name}, model_seconds={model_duration:.2f}, "
+                f"total_seconds={total_duration:.2f}, output_chars={len(text_result)}"
+            )
             return text_result.strip(), model_name
         except Exception as e:
             last_error = e
-            print(f"LLM Error with {model_name}: {e}. Trying next model...")
+            model_duration = time.time() - model_started
+            print(
+                f"LLM Error with {model_name} after {model_duration:.2f}s: "
+                f"{e}. Trying next model..."
+            )
             continue
 
     print(f"All Gemini models failed. Last error: {last_error}")
