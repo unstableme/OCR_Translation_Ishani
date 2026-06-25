@@ -1221,6 +1221,7 @@ const Dashboard = () => {
                         text: ocrDraftText,
                         source_lang: sourceLang,
                         target_lang: targetLang,
+                        repair_ocr: true,
                     }, { timeout: 300000 });
                     nextResult = {
                         ...result,

@@ -1,7 +1,6 @@
 import os
 import re
 import time
-import openai
 from google import genai
 from google.genai import types
 from pydantic import BaseModel
@@ -40,6 +39,15 @@ except Exception as e:
     gemini_client = None
 
 MODEL = "gemini-3.5-flash"
+MODELS_TO_TRY = [
+    "gemini-3-flash-preview",
+    "gemini-3.1-flash-lite",
+    "gemini-3.5-flash",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-pro",
+]
+DIRECT_TEXT_REQUEST_TIMEOUT_MS = 15000
 PIVOT_LANGUAGE = "Nepali"
 PIVOTABLE_NON_NEPALI_LANGS = {"tamang", "newari"}
 LANGUAGE_ALIASES = {
@@ -148,6 +156,7 @@ def _translate_via_nepali(
     text_input: str | list[str],
     source_lang: str,
     target_lang: str,
+    repair_ocr: bool,
 ) -> tuple[str | list[str], str]:
     source_display = _display_lang(source_lang)
     target_display = _display_lang(target_lang)
@@ -156,8 +165,18 @@ def _translate_via_nepali(
         f"{PIVOT_LANGUAGE} -> {target_display}"
     )
 
-    nepali_text, first_model = _translate_direct(text_input, source_display, PIVOT_LANGUAGE)
-    final_text, second_model = _translate_direct(nepali_text, PIVOT_LANGUAGE, target_display)
+    nepali_text, first_model = _translate_direct(
+        text_input,
+        source_display,
+        PIVOT_LANGUAGE,
+        repair_ocr=repair_ocr,
+    )
+    final_text, second_model = _translate_direct(
+        nepali_text,
+        PIVOT_LANGUAGE,
+        target_display,
+        repair_ocr=False,
+    )
     return final_text, f"nepali_pivot:{_combine_model_names(first_model, second_model)}"
 
 
@@ -165,6 +184,7 @@ def _translate_direct(
     text_input: str | list[str],
     source_lang: str,
     target_lang: str,
+    repair_ocr: bool,
 ) -> tuple[str | list[str], str]:
     source_display = _display_lang(source_lang)
     target_display = _display_lang(target_lang)
@@ -176,6 +196,7 @@ def _translate_direct(
             source_display,
             target_display,
             return_list=False,
+            repair_ocr=repair_ocr,
         )
 
     # For a single page/string, check if it's long enough to benefit from chunking.
@@ -192,22 +213,47 @@ def _translate_direct(
             chunks,
             source_display,
             target_display,
-            full_context=_build_compact_context(text_input, chunks),
+            repair_ocr=repair_ocr,
+            full_context=(
+                _build_compact_context(text_input, chunks)
+                if repair_ocr
+                else None
+            ),
         )
 
-    return _call_llm(text_input, source_display, target_display)
+    return _call_llm(
+        text_input,
+        source_display,
+        target_display,
+        repair_ocr=repair_ocr,
+    )
 
 
-def translate_text(text_input: str | list[str], source_lang: str = "Tamang/Newari", target_lang: str = "Nepali") -> tuple[str | list[str], str]:
+def translate_text(
+    text_input: str | list[str],
+    source_lang: str = "Tamang/Newari",
+    target_lang: str = "Nepali",
+    repair_ocr: bool = False,
+) -> tuple[str | list[str], str]:
     """
     Translates text between Himalayan languages.
     OPTIMIZATION: If a single long string is provided, it is chunked into paragraphs 
     and translated in parallel to hit the < 5s latency target.
     """
     if _should_translate_via_nepali(source_lang, target_lang):
-        return _translate_via_nepali(text_input, source_lang, target_lang)
+        return _translate_via_nepali(
+            text_input,
+            source_lang,
+            target_lang,
+            repair_ocr=repair_ocr,
+        )
 
-    return _translate_direct(text_input, source_lang, target_lang)
+    return _translate_direct(
+        text_input,
+        source_lang,
+        target_lang,
+        repair_ocr=repair_ocr,
+    )
 
 
 def _split_into_chunks(text: str, target_word_count: int = 220) -> list[str]:
@@ -283,7 +329,13 @@ def _build_compact_context(text: str, chunks: list[str], max_chars: int = 1800) 
     return f"{cleaned[:half]} ... {cleaned[-half:]}"
 
 
-def _call_llm(text: str, source_lang: str, target_lang: str, full_context: str | None = None) -> tuple[str, str]:
+def _call_llm(
+    text: str,
+    source_lang: str,
+    target_lang: str,
+    repair_ocr: bool = False,
+    full_context: str | None = None,
+) -> tuple[str, str]:
     """Helper for a single LLM call with context-awareness for chunked processing."""
     if not text.strip():
         return "", MODEL
@@ -299,7 +351,19 @@ def _call_llm(text: str, source_lang: str, target_lang: str, full_context: str |
 
     target_guard = _target_language_guard(target_lang)
 
-    if full_context:
+    if not repair_ocr:
+        system_prompt = f"""
+Translate the user's text from {source_lang} into {target_lang}.
+
+{target_guard}
+
+Rules:
+- Return only the translation, with no preamble or explanation.
+- Preserve paragraph breaks, names, numbers, dates, URLs, email addresses, and formatting.
+- Keep technical English terms unchanged when translating them would reduce accuracy.
+- Do not repair, rewrite, summarize, or add information; translate the supplied text directly.
+"""
+    elif full_context:
         # Prompt for chunked translation where accuracy depends on seeing the whole doc
         system_prompt = f"""
 You are a high-precision Translation & OCR Restoration Engine.
@@ -375,51 +439,108 @@ Output Requirements:
         print("LLM Error: Google GenAI Client is not initialized (missing or invalid API key)")
         return text, MODEL
 
-    models_to_try = [
-        "gemini-3-flash-preview",
-        "gemini-3.1-flash-lite",
-        "gemini-3.5-flash",  
-        "gemini-2.5-flash",
-        "gemini-2.5-flash-lite",
-        "gemini-2.5-pro",
-    ]
-    last_error = None
-    for model_name in models_to_try:
+    def generate_with_model(model_name: str) -> tuple[str, str]:
         model_started = time.time()
+        if model_name.startswith("gemini-2.5"):
+            thinking_config = types.ThinkingConfig(thinking_budget=0)
+        else:
+            thinking_config = types.ThinkingConfig(
+                thinking_level=types.ThinkingLevel.MINIMAL
+            )
+
+        http_options = None
+        max_output_tokens = None
+        if not repair_ocr:
+            # Direct text is latency-critical: avoid hidden SDK retries.
+            # Gemini requires manually configured deadlines to be >= 10s.
+            http_options = types.HttpOptions(
+                timeout=DIRECT_TEXT_REQUEST_TIMEOUT_MS,
+                retry_options=types.HttpRetryOptions(attempts=1),
+            )
+            max_output_tokens = min(
+                4096,
+                max(512, input_words * 12),
+            )
+
+        response = gemini_client.models.generate_content(
+            model=model_name,
+            contents=f"SNIPPET TO TRANSLATE:\n{text}",
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt.strip(),
+                temperature=0.0,
+                thinking_config=thinking_config,
+                max_output_tokens=max_output_tokens,
+                http_options=http_options,
+            )
+        )
+        text_result = response.text
+        if not text_result:
+            raise ValueError("Empty response text (possible safety block)")
+        model_duration = time.time() - model_started
+        total_duration = time.time() - request_started
+        print(
+            "LLM request complete: "
+            f"model={model_name}, model_seconds={model_duration:.2f}, "
+            f"total_seconds={total_duration:.2f}, output_chars={len(text_result)}"
+        )
+        return text_result.strip(), model_name
+
+    if not repair_ocr:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        # Submit in the configured preference order, but return whichever model
+        # produces a valid full translation first. This avoids waiting behind a
+        # busy preferred model while another preferred fallback is healthy.
+        executor = ThreadPoolExecutor(max_workers=len(MODELS_TO_TRY))
+        futures = {
+            executor.submit(generate_with_model, model_name): model_name
+            for model_name in MODELS_TO_TRY
+        }
+        last_error = None
         try:
-            response = gemini_client.models.generate_content(
-                model=model_name,
-                contents=f"SNIPPET TO TRANSLATE:\n{text}",
-                config=types.GenerateContentConfig(
-                    system_instruction=system_prompt.strip(),
-                    temperature=0.0,
-                )
-            )
-            text_result = response.text
-            if not text_result:
-                raise ValueError("Empty response text (possible safety block)")
-            model_duration = time.time() - model_started
-            total_duration = time.time() - request_started
-            print(
-                "LLM request complete: "
-                f"model={model_name}, model_seconds={model_duration:.2f}, "
-                f"total_seconds={total_duration:.2f}, output_chars={len(text_result)}"
-            )
-            return text_result.strip(), model_name
+            for future in as_completed(futures):
+                model_name = futures[future]
+                try:
+                    result = future.result()
+                    for pending in futures:
+                        if pending is not future:
+                            pending.cancel()
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    return result
+                except Exception as e:
+                    last_error = e
+                    print(
+                        f"LLM Error with {model_name}: {e}. "
+                        "Waiting for another model..."
+                    )
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+
+        print(f"All Gemini models failed. Last error: {last_error}")
+        return text, MODEL
+
+    last_error = None
+    for model_name in MODELS_TO_TRY:
+        try:
+            return generate_with_model(model_name)
         except Exception as e:
             last_error = e
-            model_duration = time.time() - model_started
             print(
-                f"LLM Error with {model_name} after {model_duration:.2f}s: "
-                f"{e}. Trying next model..."
+                f"LLM Error with {model_name}: {e}. Trying next model..."
             )
-            continue
 
     print(f"All Gemini models failed. Last error: {last_error}")
     return text, MODEL
 
 
-def translate_parallel_chunks(chunks: list[str], source_lang: str, target_lang: str, return_list: bool = False, full_context: str | None = None) -> tuple[str | list[str], str]:
+def translate_parallel_chunks(
+    chunks: list[str],
+    source_lang: str,
+    target_lang: str,
+    return_list: bool = False,
+    repair_ocr: bool = False,
+    full_context: str | None = None,
+) -> tuple[str | list[str], str]:
     """Translates multiple chunks/pages in parallel to hit the < 5s target."""
     from concurrent.futures import ThreadPoolExecutor
 
@@ -428,7 +549,13 @@ def translate_parallel_chunks(chunks: list[str], source_lang: str, target_lang: 
     start_time = time.time()
     
     def translate_single(chunk):
-        return _call_llm(chunk, source_lang, target_lang, full_context=full_context)
+        return _call_llm(
+            chunk,
+            source_lang,
+            target_lang,
+            repair_ocr=repair_ocr,
+            full_context=full_context,
+        )
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         results = list(executor.map(translate_single, chunks))
