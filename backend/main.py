@@ -26,6 +26,7 @@ class TranslationRequest(BaseModel):
     text: Union[str, List[str]]
     source_lang: str = "Tamang" # Backend supports "Tamang", "Newari", or combinations like "Tamang/Newari"
     target_lang: str = "Nepali"
+    repair_ocr: bool = False
 
 # Quick diagnostic for database connection
 db_url = os.getenv("DATABASE_URL", "")
@@ -112,9 +113,10 @@ async def translate_only(request: TranslationRequest):
 
     try:
         translated_text, model_used = translate_text(
-            request.text, 
-            request.source_lang, 
-            request.target_lang
+            request.text,
+            request.source_lang,
+            request.target_lang,
+            repair_ocr=request.repair_ocr,
         )
         total_duration = time.time() - t0
         return {
@@ -281,7 +283,12 @@ async def upload_file(
         # --- 3. LLM API Response ---
         t_llm_start = time.time()
         # Passing the list of pages triggers parallel translation in the translator module
-        translated_text, model_used = translate_text(extracted_pages, source_lang, target_lang)
+        translated_text, model_used = translate_text(
+            extracted_pages,
+            source_lang,
+            target_lang,
+            repair_ocr=True,
+        )
         t_llm_end = time.time()
         llm_duration = t_llm_end - t_llm_start
 
