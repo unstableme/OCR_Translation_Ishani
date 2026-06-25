@@ -271,6 +271,12 @@ async def upload_file(
         detailed_result = ocr_engine.process_detailed(file_path)
         extracted_pages = [p["text"] for p in detailed_result["pages"]]
         extracted_text = "\n\n".join(extracted_pages)
+        ocr_quality = detailed_result.get("ocr_quality", {})
+        ocr_quality_warning = (
+            ocr_quality.get("message")
+            if ocr_quality.get("review_required")
+            else None
+        )
         avg_confidence = (
             sum(p["confidence"] for p in detailed_result["pages"])
             / len(detailed_result["pages"])
@@ -354,13 +360,21 @@ async def upload_file(
             "ocr_result_id": ocr_result_id,
             "translation_id": translation_id,
             "persistence_status": "saved" if db_available else "skipped",
-            "warning": db_warning,
+            "warning": " ".join(
+                warning
+                for warning in (db_warning, ocr_quality_warning)
+                if warning
+            ) or None,
             "extracted_text": extracted_text,
             "translated_text": translated_text,
             "original_filename": filename,
             "ocr_confidence": round(avg_confidence, 4),
             "ocr_pages": detailed_result["pages"],
             "ocr_strategy": detailed_result.get("ocr_strategy", "unknown"),
+            "ocr_quality": ocr_quality,
+            "ocr_review_required": bool(
+                ocr_quality.get("review_required")
+            ),
             "debug_image_urls": detailed_result.get("debug_images", []),
             "timing": {
                 "file_upload_seconds": round(upload_duration, 2),
@@ -450,6 +464,12 @@ async def ocr_extraction_only(file: UploadFile = File(...)):
         detailed_result = ocr_engine.process_detailed(file_path)
         extracted_pages = [p["text"] for p in detailed_result["pages"]]
         extracted_text = "\n\n".join(extracted_pages)
+        ocr_quality = detailed_result.get("ocr_quality", {})
+        ocr_quality_warning = (
+            ocr_quality.get("message")
+            if ocr_quality.get("review_required")
+            else None
+        )
         avg_confidence = (
             sum(p["confidence"] for p in detailed_result["pages"])
             / len(detailed_result["pages"])
@@ -504,13 +524,21 @@ async def ocr_extraction_only(file: UploadFile = File(...)):
             "document_id": doc_id,
             "ocr_result_id": ocr_result_id,
             "persistence_status": "saved" if db_available else "skipped",
-            "warning": db_warning,
+            "warning": " ".join(
+                warning
+                for warning in (db_warning, ocr_quality_warning)
+                if warning
+            ) or None,
             "extracted_text": extracted_text,
             "translated_text": "",
             "original_filename": filename,
             "ocr_confidence": round(avg_confidence, 4),
             "ocr_pages": detailed_result["pages"],
             "ocr_strategy": detailed_result.get("ocr_strategy", "unknown"),
+            "ocr_quality": ocr_quality,
+            "ocr_review_required": bool(
+                ocr_quality.get("review_required")
+            ),
             "debug_image_urls": detailed_result.get("debug_images", []),
             "workflow_stage": "ocr_review",
             "timing": {

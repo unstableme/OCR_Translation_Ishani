@@ -1930,6 +1930,15 @@ const Dashboard = () => {
                                 <LoadingState />
                             ) : result ? (
                                 <div className="result-content">
+                                    {result.ocr_review_required && (
+                                        <div className="ocr-quality-warning">
+                                            <AlertCircle size={18} />
+                                            <span>
+                                                {result.ocr_quality?.message
+                                                    || 'OCR quality is low. Please review the extracted text before translating.'}
+                                            </span>
+                                        </div>
+                                    )}
                                     <div className="tabs">
                                         <button
                                             className={`tab ${activeTab === 'translated' ? 'active' : ''} ${isOcrReview ? 'disabled' : ''}`}
@@ -1966,8 +1975,15 @@ const Dashboard = () => {
                                     {/* Results are now clean and focused only on text */}
 
                                     <div className="result-footer">
-                                        <p className="status-badge success">
-                                            <Check size={14} /> {isOcrReview ? 'OCR Ready for Review' : 'Processing Complete'}
+                                        <p className={`status-badge ${result.ocr_review_required ? 'warning' : 'success'}`}>
+                                            {result.ocr_review_required
+                                                ? <AlertCircle size={14} />
+                                                : <Check size={14} />}
+                                            {result.ocr_review_required
+                                                ? 'OCR Needs Careful Review'
+                                                : isOcrReview
+                                                    ? 'OCR Ready for Review'
+                                                    : 'Processing Complete'}
                                         </p>
 
                                         {result.timing && (

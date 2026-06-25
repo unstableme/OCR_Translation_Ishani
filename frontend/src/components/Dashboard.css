@@ -451,6 +451,24 @@
     font-size: 0.875rem;
 }
 
+.ocr-quality-warning {
+    padding: 0.75rem;
+    background: rgba(245, 158, 11, 0.12);
+    border: 1px solid rgba(245, 158, 11, 0.55);
+    border-radius: 0.5rem;
+    color: #fbbf24;
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    font-size: 0.875rem;
+    line-height: 1.4;
+}
+
+.ocr-quality-warning svg {
+    flex: 0 0 auto;
+    margin-top: 0.1rem;
+}
+
 .status-badge {
     padding: 0.25rem 0.75rem;
     border-radius: 1rem;
@@ -464,6 +482,11 @@
 .status-badge.success {
     background: rgba(16, 185, 129, 0.2);
     color: var(--success-color);
+}
+
+.status-badge.warning {
+    background: rgba(245, 158, 11, 0.2);
+    color: #fbbf24;
 }
 
 .result-content {

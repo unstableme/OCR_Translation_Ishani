@@ -31,11 +31,13 @@ import cv2
 import numpy as np
 import pytesseract as pt
 import fitz  # PyMuPDF
+from google import genai
+from google.genai import types as genai_types
 from docx import Document
+from dotenv import find_dotenv, load_dotenv
 from PIL import Image as PILImage
 
 from ocr.preprocessing import (
-    preprocess_pil_image,
     preprocess_array,
     DEFAULT_CONFIG as PREPROCESS_DEFAULT_CONFIG,
 )
@@ -55,6 +57,11 @@ PDF_SCANNER_ARTIFACT_LINES = {
 }
 MIN_LAYOUT_REGION_CHARS = 80
 FAST_PATH_PSM_MODES = ("--psm 3", "--psm 4", "--psm 6", "--psm 11", "--psm 1")
+OCR_HIGH_QUALITY_SCORE = 0.80
+OCR_REVIEW_REQUIRED_SCORE = 0.62
+AI_OCR_MODELS = ("gemini-3-flash-preview", "gemini-2.5-flash")
+AI_OCR_TIMEOUT_MS = 30000
+_ai_ocr_client = None
 
 
 class OCRError(Exception):
@@ -78,6 +85,221 @@ def _make_page_result(text: str, confidence: float = 0.0,
 def _make_result(pages: list[dict]) -> dict:
     """Wrap page results in the standard output format."""
     return {"pages": pages}
+
+
+def _ocr_page_quality(page: dict) -> dict:
+    """Score OCR output using confidence, script coherence, and text sanity."""
+    text = (page.get("text") or "").strip()
+    confidence = max(0.0, min(1.0, float(page.get("confidence") or 0.0)))
+    compact_chars = [char for char in text if not char.isspace()]
+    char_count = len(compact_chars)
+
+    devanagari_count = sum("\u0900" <= char <= "\u097f" for char in compact_chars)
+    latin_count = sum(char.isascii() and char.isalpha() for char in compact_chars)
+    digit_count = sum(char.isdigit() for char in compact_chars)
+    letter_count = devanagari_count + latin_count
+
+    # A coherent document may be Devanagari or English. Random OCR failures
+    # commonly alternate between both scripts in short fragments.
+    script_coherence = (
+        max(devanagari_count, latin_count) / letter_count
+        if letter_count
+        else 0.0
+    )
+    valid_char_ratio = (
+        (letter_count + digit_count) / char_count
+        if char_count
+        else 0.0
+    )
+
+    tokens = [token for token in text.split() if token]
+    single_char_tokens = sum(
+        len("".join(char for char in token if char.isalnum())) <= 1
+        for token in tokens
+    )
+    token_quality = (
+        1.0 - (single_char_tokens / len(tokens))
+        if tokens
+        else 0.0
+    )
+    coverage = min(1.0, char_count / 300.0)
+
+    score = (
+        confidence * 0.60
+        + script_coherence * 0.15
+        + valid_char_ratio * 0.10
+        + token_quality * 0.10
+        + coverage * 0.05
+    )
+    if char_count < 40:
+        score *= char_count / 40.0
+
+    return {
+        "score": round(float(score), 4),
+        "confidence": round(confidence, 4),
+        "character_count": char_count,
+        "word_count": len(tokens),
+        "script_coherence": round(float(script_coherence), 4),
+        "valid_character_ratio": round(float(valid_char_ratio), 4),
+        "single_character_token_ratio": round(
+            single_char_tokens / len(tokens) if tokens else 1.0,
+            4,
+        ),
+        "devanagari_characters": devanagari_count,
+        "latin_characters": latin_count,
+    }
+
+
+def _quality_status(score: float) -> str:
+    if score >= OCR_HIGH_QUALITY_SCORE:
+        return "high"
+    if score >= OCR_REVIEW_REQUIRED_SCORE:
+        return "medium"
+    return "low"
+
+
+def _suspicious_ocr_reasons(result: dict) -> list[str]:
+    """Identify structurally suspicious OCR even when character confidence is high."""
+    diagnostics = result.get("ocr_diagnostics") or {}
+    if not diagnostics.get("complex_layout"):
+        return []
+    if not diagnostics.get("layout_attempted"):
+        return []
+
+    global_chars = int(diagnostics.get("global_text_length") or 0)
+    layout_chars = int(diagnostics.get("layout_text_length") or 0)
+    global_quality = float(diagnostics.get("global_quality") or 0.0)
+    layout_quality = float(diagnostics.get("layout_quality") or 0.0)
+    global_confidence = float(diagnostics.get("global_confidence") or 0.0)
+    layout_confidence = float(diagnostics.get("layout_confidence") or 0.0)
+    length_ratio = layout_chars / float(max(1, global_chars))
+
+    reasons = []
+    if (
+        layout_chars >= global_chars + 250
+        and length_ratio >= 1.60
+    ):
+        reasons.append("major_candidate_length_disagreement")
+    if (
+        length_ratio >= 1.35
+        and layout_quality < OCR_REVIEW_REQUIRED_SCORE
+    ):
+        reasons.append("layout_candidate_gibberish")
+    if (
+        length_ratio >= 1.35
+        and global_confidence - layout_confidence >= 0.25
+    ):
+        reasons.append("large_layout_confidence_gap")
+    if (
+        length_ratio >= 2.0
+        and global_quality - layout_quality >= 0.15
+    ):
+        reasons.append("possible_global_ocr_omission")
+    return reasons
+
+
+def _get_ai_ocr_client():
+    """Create the Gemini client lazily so normal OCR has no AI dependency."""
+    global _ai_ocr_client
+    if _ai_ocr_client is not None:
+        return _ai_ocr_client
+
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        load_dotenv(find_dotenv())
+        api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        return None
+
+    _ai_ocr_client = genai.Client(api_key=api_key)
+    return _ai_ocr_client
+
+
+def _clean_ai_transcription(text: str) -> str:
+    """Remove accidental markdown wrappers without altering transcription."""
+    cleaned = (text or "").strip()
+    if cleaned.startswith("```") and cleaned.endswith("```"):
+        lines = cleaned.splitlines()
+        if lines:
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        cleaned = "\n".join(lines).strip()
+    normalized = " ".join(cleaned.lower().strip(" .[]").split())
+    if normalized in {
+        "",
+        "no readable text",
+        "no text found",
+        "no text is visible",
+        "the image contains no readable text",
+        "unable to transcribe",
+    }:
+        return ""
+    return cleaned
+
+
+def _transcribe_image_with_gemini(image: np.ndarray) -> tuple[str, str]:
+    """Strict multimodal transcription used only after conventional OCR fails."""
+    client = _get_ai_ocr_client()
+    if client is None:
+        raise OCRError("Gemini OCR fallback is unavailable: API key is not configured")
+
+    ok, encoded = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 92])
+    if not ok:
+        raise OCRError("Could not encode image for Gemini OCR fallback")
+
+    prompt = """
+Transcribe all readable text in this document image verbatim.
+
+Rules:
+- Preserve the natural reading order and paragraph/column order.
+- Preserve headings, labels, numbers, punctuation, and line breaks where useful.
+- Do not translate, summarize, explain, modernize, or rewrite the content.
+- Do not infer missing sentences. Use [...] only for genuinely unreadable text.
+- Ignore non-text decoration and surrounding desk/background outside the document.
+- Return only the transcription, with no markdown fences or commentary.
+""".strip()
+    image_part = genai_types.Part.from_bytes(
+        data=encoded.tobytes(),
+        mime_type="image/jpeg",
+    )
+
+    last_error = None
+    for model_name in AI_OCR_MODELS:
+        try:
+            thinking_config = (
+                genai_types.ThinkingConfig(thinking_budget=0)
+                if model_name.startswith("gemini-2.5")
+                else genai_types.ThinkingConfig(
+                    thinking_level=genai_types.ThinkingLevel.MINIMAL
+                )
+            )
+            response = client.models.generate_content(
+                model=model_name,
+                contents=[image_part, prompt],
+                config=genai_types.GenerateContentConfig(
+                    temperature=0.0,
+                    max_output_tokens=8192,
+                    thinking_config=thinking_config,
+                    http_options=genai_types.HttpOptions(
+                        timeout=AI_OCR_TIMEOUT_MS,
+                        retry_options=genai_types.HttpRetryOptions(attempts=1),
+                    ),
+                ),
+            )
+            transcription = _clean_ai_transcription(response.text or "")
+            if not transcription:
+                raise ValueError("Gemini returned an empty transcription")
+            return transcription, model_name
+        except Exception as exc:
+            last_error = exc
+            logger.warning(
+                "[AI OCR] model=%s failed: %s",
+                model_name,
+                exc,
+            )
+
+    raise OCRError(f"All Gemini OCR fallback models failed: {last_error}")
 
 
 def _strip_pdf_text_artifacts(page_texts: list[str]) -> list[str]:
@@ -1008,6 +1230,7 @@ class HybridOCREngine:
         best_text_len = 0
         best_conf = 0.0
         best_psm = ""
+        best_quality = None
 
         for psm in FAST_PATH_PSM_MODES:
             engine = TesseractOCREngine(
@@ -1024,19 +1247,41 @@ class HybridOCREngine:
             page = result["pages"][0]
             text = page["text"].strip()
             conf = page["confidence"]
+            quality = _ocr_page_quality(page)
 
-            logger.info("[Hybrid] Tried %s: text_len=%d, conf=%.4f", psm, len(text), conf)
+            logger.info(
+                "[Hybrid] Tried %s: text_len=%d, conf=%.4f, quality=%.4f",
+                psm,
+                len(text),
+                conf,
+                quality["score"],
+            )
 
-            # Pick the mode that extracted the most text
-            if len(text) > best_text_len:
+            # Prefer reliable, coherent OCR over a longer noisy transcription.
+            if (
+                best_quality is None
+                or quality["score"] > best_quality["score"]
+                or (
+                    quality["score"] == best_quality["score"]
+                    and len(text) > best_text_len
+                )
+            ):
                 best_result = result
                 best_text_len = len(text)
                 best_conf = conf
                 best_psm = psm
+                best_quality = quality
 
         t_fast = time.time() - t_start
-        logger.info("[Hybrid] Fast path complete in %.2fs — best_psm=%s, best_text_len=%d, best_conf=%.4f",
-                    t_fast, best_psm, best_text_len, best_conf)
+        logger.info(
+            "[Hybrid] Fast path complete in %.2fs — best_psm=%s, "
+            "best_text_len=%d, best_conf=%.4f, best_quality=%.4f",
+            t_fast,
+            best_psm,
+            best_text_len,
+            best_conf,
+            best_quality["score"] if best_quality else 0.0,
+        )
 
         # Detect printed text regions even when the global pass returned text.
         # Multi-column pages can otherwise look "successful" while being
@@ -1048,8 +1293,25 @@ class HybridOCREngine:
             "[Hybrid] OpenCV layout detected %d region(s), complex_layout=%s",
             len(regions), complex_layout,
         )
+        diagnostics = {
+            "complex_layout": complex_layout,
+            "region_count": len(regions),
+            "global_psm": best_psm,
+            "global_text_length": best_text_len,
+            "global_confidence": round(float(best_conf), 4),
+            "global_quality": (
+                best_quality["score"]
+                if best_quality
+                else 0.0
+            ),
+            "layout_attempted": False,
+            "layout_text_length": 0,
+            "layout_confidence": 0.0,
+            "layout_quality": 0.0,
+        }
 
         if regions and (complex_layout or best_conf < self.threshold):
+            diagnostics["layout_attempted"] = True
             layout_result = self._process_regions_with_tesseract(
                 image,
                 regions,
@@ -1058,38 +1320,64 @@ class HybridOCREngine:
             layout_page = layout_result["pages"][0]
             layout_text_len = len(layout_page["text"].strip())
             layout_conf = layout_page["confidence"]
+            layout_quality = _ocr_page_quality(layout_page)
+            diagnostics.update({
+                "layout_text_length": layout_text_len,
+                "layout_confidence": round(float(layout_conf), 4),
+                "layout_quality": layout_quality["score"],
+            })
             logger.info(
-                "[Hybrid] Layout path: text_len=%d, conf=%.4f",
+                "[Hybrid] Layout path: text_len=%d, conf=%.4f, quality=%.4f",
                 layout_text_len,
                 layout_conf,
+                layout_quality["score"],
             )
 
             if (
                 layout_text_len >= MIN_LAYOUT_REGION_CHARS
                 and (
-                    complex_layout
-                    or layout_text_len >= int(best_text_len * 1.08)
-                    or layout_conf >= best_conf
+                    best_quality is None
+                    or layout_quality["score"] >= best_quality["score"] + 0.02
+                    or (
+                        layout_quality["score"] >= best_quality["score"] - 0.01
+                        and layout_text_len >= int(best_text_len * 1.15)
+                    )
                 )
             ):
                 layout_result["ocr_strategy"] = "opencv_layout_tesseract"
+                layout_result["ocr_diagnostics"] = diagnostics
                 return layout_result
 
         # Accept fast path if Tesseract extracted meaningful content and the
         # page does not appear to need regional layout handling.
-        if best_text_len > 100:
-            logger.info("[Hybrid] Fast path ACCEPTED (text_len=%d > 100, psm=%s)",
-                        best_text_len, best_psm)
+        if (
+            best_result is not None
+            and best_text_len > 100
+            and best_quality is not None
+            and best_quality["score"] >= OCR_REVIEW_REQUIRED_SCORE
+        ):
+            logger.info(
+                "[Hybrid] Fast path ACCEPTED "
+                "(text_len=%d, quality=%.4f, psm=%s)",
+                best_text_len,
+                best_quality["score"],
+                best_psm,
+            )
             best_result["ocr_strategy"] = f"tesseract_multi_psm_{best_psm.replace('--', '')}"
+            best_result["ocr_diagnostics"] = diagnostics
             return best_result
 
         # ============================================================
         # SLOW PATH: docTR layout detection + parallel Tesseract on crops
         # Only triggered when Tesseract truly fails (< 100 chars extracted)
         # ============================================================
-        logger.info("[Hybrid] Fast path rejected (best_text_len=%d < 100). "
-                    "Falling back to docTR layout + parallel Tesseract...",
-                    best_text_len)
+        logger.info(
+            "[Hybrid] Fast path rejected "
+            "(best_text_len=%d, quality=%.4f). "
+            "Falling back to docTR layout + parallel Tesseract...",
+            best_text_len,
+            best_quality["score"] if best_quality else 0.0,
+        )
 
         # --- 1. Layout Analysis via docTR ---
         try:
@@ -1201,24 +1489,266 @@ class HybridOCREngine:
 
         result = _make_result([_make_page_result(full_text, avg_conf, all_boxes)])
         result["ocr_strategy"] = "doctr_layout_parallel_tesseract"
+        slow_quality = _ocr_page_quality(result["pages"][0])
+        if (
+            best_result is not None
+            and best_quality is not None
+            and best_quality["score"] > slow_quality["score"]
+        ):
+            best_result["ocr_strategy"] = (
+                f"tesseract_multi_psm_{best_psm.replace('--', '')}_"
+                "after_doctr_comparison"
+            )
+            return best_result
+        return result
+
+    def process_image_adaptive(self, original: np.ndarray) -> dict:
+        """
+        Compare OCR-safe image variants and retain the strongest result.
+
+        Clean phone photos often work best with only grayscale/deskew, while
+        faded scans benefit from denoising and contrast enhancement. Colored
+        artifact removal is evaluated only as a fallback because a page-wide
+        color cast can otherwise erase legitimate text.
+        """
+        candidate_configs = [
+            (
+                "grayscale_deskew",
+                {
+                    "remove_colors": False,
+                    "denoise": False,
+                    "contrast_enhance": False,
+                },
+            ),
+            (
+                "safe_enhanced",
+                {
+                    "remove_colors": False,
+                },
+            ),
+            (
+                "configured_preprocessing",
+                self.preprocess_config or {},
+            ),
+        ]
+
+        candidates = []
+        seen_signatures = set()
+        for variant_name, overrides in candidate_configs:
+            config = {
+                **PREPROCESS_DEFAULT_CONFIG,
+                **(self.preprocess_config or {}),
+                **overrides,
+            }
+            signature = tuple(sorted(
+                (key, str(value))
+                for key, value in config.items()
+                if key not in {"debug", "debug_output_dir"}
+            ))
+            if signature in seen_signatures:
+                continue
+            seen_signatures.add(signature)
+
+            processed = preprocess_array(original, config)
+            result = self.process_image(processed, layout_image=original)
+            page = result["pages"][0]
+            quality = _ocr_page_quality(page)
+            strategy = result.get("ocr_strategy", "unknown")
+            suspicion_reasons = _suspicious_ocr_reasons(result)
+            candidates.append({
+                "variant": variant_name,
+                "result": result,
+                "quality": quality,
+                "strategy": strategy,
+                "suspicion_reasons": suspicion_reasons,
+            })
+            logger.info(
+                "[Adaptive OCR] variant=%s, strategy=%s, "
+                "quality=%.4f, confidence=%.4f, chars=%d",
+                variant_name,
+                strategy,
+                quality["score"],
+                quality["confidence"],
+                quality["character_count"],
+            )
+            if suspicion_reasons:
+                logger.warning(
+                    "[Adaptive OCR] suspicious result detected: %s",
+                    ", ".join(suspicion_reasons),
+                )
+
+            # A strong minimally processed result is the safest and fastest
+            # answer; additional transformations cannot add useful certainty.
+            if (
+                variant_name == "grayscale_deskew"
+                and quality["score"] >= OCR_HIGH_QUALITY_SCORE
+            ):
+                break
+
+        if not candidates:
+            return _make_result([_make_page_result("", 0.0)])
+
+        best = max(
+            candidates,
+            key=lambda candidate: (
+                candidate["quality"]["score"],
+                candidate["quality"]["confidence"],
+                candidate["quality"]["character_count"],
+            ),
+        )
+        result = best["result"]
+        quality = best["quality"]
+        suspicion_reasons = best.get("suspicion_reasons", [])
+        ai_fallback = None
+        should_try_ai = (
+            quality["score"] < OCR_REVIEW_REQUIRED_SCORE
+            or bool(suspicion_reasons)
+        )
+
+        if should_try_ai:
+            try:
+                ai_text, ai_model = _transcribe_image_with_gemini(original)
+                # Gemini does not expose word-level OCR confidence, so keep
+                # this estimate conservative and require a clear quality gain.
+                ai_page = _make_page_result(ai_text, confidence=0.78)
+                ai_quality = _ocr_page_quality(ai_page)
+                minimum_chars = max(
+                    5,
+                    int(
+                        quality["character_count"]
+                        * (0.75 if suspicion_reasons else 0.50)
+                    ),
+                )
+                if suspicion_reasons:
+                    # Character confidence can remain deceptively high when
+                    # paragraphs are missing or reordered. For suspicious
+                    # layouts, require coherent and comparably complete AI
+                    # transcription rather than a higher synthetic confidence.
+                    accepted = (
+                        ai_quality["score"]
+                        >= max(0.76, quality["score"] - 0.12)
+                        and ai_quality["character_count"] >= minimum_chars
+                    )
+                else:
+                    accepted = (
+                        ai_quality["score"]
+                        >= max(
+                            OCR_REVIEW_REQUIRED_SCORE + 0.04,
+                            quality["score"] + 0.06,
+                        )
+                        and ai_quality["character_count"] >= minimum_chars
+                    )
+                ai_fallback = {
+                    "attempted": True,
+                    "accepted": accepted,
+                    "model": ai_model,
+                    "quality": ai_quality,
+                    "trigger_reasons": (
+                        suspicion_reasons
+                        or ["low_conventional_ocr_quality"]
+                    ),
+                }
+                logger.info(
+                    "[AI OCR] model=%s, accepted=%s, "
+                    "quality=%.4f vs conventional=%.4f",
+                    ai_model,
+                    accepted,
+                    ai_quality["score"],
+                    quality["score"],
+                )
+                if accepted:
+                    result = _make_result([ai_page])
+                    result["ocr_strategy"] = (
+                        f"gemini_vision_fallback_{ai_model}"
+                    )
+                    result["ocr_diagnostics"] = best["result"].get(
+                        "ocr_diagnostics",
+                        {},
+                    )
+                    best = {
+                        "variant": "gemini_vision",
+                        "result": result,
+                        "quality": ai_quality,
+                        "strategy": result["ocr_strategy"],
+                        "suspicion_reasons": suspicion_reasons,
+                    }
+                    quality = ai_quality
+            except Exception as exc:
+                ai_fallback = {
+                    "attempted": True,
+                    "accepted": False,
+                    "error": str(exc),
+                    "trigger_reasons": (
+                        suspicion_reasons
+                        or ["low_conventional_ocr_quality"]
+                    ),
+                }
+                logger.warning("[AI OCR] fallback unavailable: %s", exc)
+
+        status = _quality_status(quality["score"])
+        ai_accepted = bool(ai_fallback and ai_fallback.get("accepted"))
+        if not ai_accepted:
+            result["ocr_strategy"] = (
+                f"adaptive_{best['variant']}+"
+                f"{result.get('ocr_strategy', 'unknown')}"
+            )
+        if ai_accepted:
+            quality_message = (
+                "Conventional OCR was unreliable, so Gemini Vision produced "
+                "this transcription. Review it before translating."
+            )
+        elif status == "low":
+            quality_message = (
+                "OCR quality is low. Review the extracted text or retake the "
+                "image with even lighting and the page filling the frame."
+            )
+        elif suspicion_reasons:
+            quality_message = (
+                "OCR candidates disagreed substantially on this complex "
+                "layout. Review the extracted text before translating."
+            )
+        else:
+            quality_message = ""
+        result["ocr_quality"] = {
+            **quality,
+            "status": status,
+            "review_required": (
+                status == "low"
+                or ai_accepted
+                or bool(suspicion_reasons)
+            ),
+            "message": quality_message,
+            "selected_variant": best["variant"],
+            "suspicion_reasons": suspicion_reasons,
+            "ai_fallback": ai_fallback,
+            "candidates": [
+                {
+                    "variant": candidate["variant"],
+                    "strategy": candidate["strategy"],
+                    "suspicion_reasons": candidate["suspicion_reasons"],
+                    **candidate["quality"],
+                }
+                for candidate in candidates
+            ],
+        }
         return result
 
     def process_pdf(self, pdf_path: str, poppler_path: Optional[str] = None) -> dict:
         """Per-page hybrid: each page independently evaluated."""
         images = _convert_pdf_to_images(pdf_path, poppler_path)
-        cfg = self.preprocess_config
 
         pages = []
         strategies = []
+        page_qualities = []
         for idx, pil_img in enumerate(images):
             page_rgb = np.array(pil_img.convert("RGB"))
             page_bgr = cv2.cvtColor(page_rgb, cv2.COLOR_RGB2BGR)
-            preprocessed = preprocess_pil_image(pil_img, cfg)
-            
-            result = self.process_image(preprocessed, layout_image=page_bgr)
+            result = self.process_image_adaptive(page_bgr)
             strategy = result.get("ocr_strategy")
             if strategy:
                 strategies.append(strategy)
+            if result.get("ocr_quality"):
+                page_qualities.append(result["ocr_quality"])
             
             p = result["pages"][0]
             pages.append(p)
@@ -1227,6 +1757,22 @@ class HybridOCREngine:
         pdf_result = _make_result(pages)
         if strategies:
             pdf_result["ocr_strategy"] = "+".join(dict.fromkeys(strategies))
+        if page_qualities:
+            weakest = min(page_qualities, key=lambda quality: quality["score"])
+            pdf_result["ocr_quality"] = {
+                "score": round(
+                    sum(quality["score"] for quality in page_qualities)
+                    / len(page_qualities),
+                    4,
+                ),
+                "status": weakest["status"],
+                "review_required": any(
+                    quality["review_required"]
+                    for quality in page_qualities
+                ),
+                "message": weakest["message"],
+                "pages": page_qualities,
+            }
         return pdf_result
 
 
@@ -1351,8 +1897,7 @@ class OCREngine:
         original = cv2.imread(str(path))
         if original is None:
             raise OCRError(f"Could not read image from path: {file_path}")
-        preprocessed = preprocess_array(original, self.preprocess_config)
-        result = self._hybrid.process_image(preprocessed, layout_image=original)
+        result = self._hybrid.process_image_adaptive(original)
 
         return [p["text"] for p in result["pages"]]
 
@@ -1411,8 +1956,7 @@ class OCREngine:
         original = cv2.imread(str(path))
         if original is None:
             raise OCRError(f"Could not read image from path: {file_path}")
-        preprocessed = preprocess_array(original, self.preprocess_config)
-        result = self._hybrid.process_image(preprocessed, layout_image=original)
+        result = self._hybrid.process_image_adaptive(original)
         
         return result
 
