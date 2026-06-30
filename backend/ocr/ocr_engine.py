@@ -18,6 +18,7 @@ intelligent fallback mechanism.
 
 """
 # pyre-ignore-all-errors
+import json
 import os
 import logging
 from pathlib import Path
@@ -59,8 +60,16 @@ MIN_LAYOUT_REGION_CHARS = 80
 FAST_PATH_PSM_MODES = ("--psm 3", "--psm 4", "--psm 6", "--psm 11", "--psm 1")
 OCR_HIGH_QUALITY_SCORE = 0.80
 OCR_REVIEW_REQUIRED_SCORE = 0.62
-AI_OCR_MODELS = ("gemini-3-flash-preview", "gemini-2.5-flash")
+AI_OCR_MODELS = (
+    "gemini-3-flash-preview",
+    "gemini-3.5-flash",
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
+)
 AI_OCR_TIMEOUT_MS = 30000
+SPECIAL_SCRIPT_NAMES = {"ranjana", "prachalit", "tamyig", "tibetan"}
+SPECIAL_SCRIPT_MIN_CONFIDENCE = 0.55
+WRONG_SCRIPT_AI_SCORE_THRESHOLD = 0.68
 _ai_ocr_client = None
 
 
@@ -158,6 +167,40 @@ def _quality_status(score: float) -> str:
     return "low"
 
 
+def _should_try_ai_before_doctr(page: dict) -> tuple[bool, list[str]]:
+    """
+    Detect OCR that is probably a wrong-script hallucination.
+
+    Ranjana, Prachalit, and Tamyig pages often become Latin-like fragments
+    under Tesseract. When that pattern appears, trying docTR first only adds
+    latency and can trigger model downloads without fixing the script issue.
+    """
+    quality = _ocr_page_quality(page)
+    if quality["score"] >= WRONG_SCRIPT_AI_SCORE_THRESHOLD:
+        return False, []
+    if quality["character_count"] < 80:
+        return False, []
+
+    devanagari = quality["devanagari_characters"]
+    latin = quality["latin_characters"]
+    reasons = []
+
+    if latin >= 80 and devanagari <= max(12, int(latin * 0.18)):
+        reasons.append("latin_like_wrong_script_ocr")
+    if (
+        quality["single_character_token_ratio"] >= 0.32
+        and quality["confidence"] < 0.58
+    ):
+        reasons.append("fragmented_low_confidence_ocr")
+    if (
+        quality["valid_character_ratio"] < 0.72
+        and quality["confidence"] < 0.55
+    ):
+        reasons.append("noisy_low_confidence_ocr")
+
+    return bool(reasons), reasons
+
+
 def _suspicious_ocr_reasons(result: dict) -> list[str]:
     """Identify structurally suspicious OCR even when character confidence is high."""
     diagnostics = result.get("ocr_diagnostics") or {}
@@ -238,17 +281,155 @@ def _clean_ai_transcription(text: str) -> str:
     return cleaned
 
 
-def _transcribe_image_with_gemini(image: np.ndarray) -> tuple[str, str]:
+def _image_to_gemini_part(image: np.ndarray) -> genai_types.Part:
+    """Encode a page image as a Gemini-compatible JPEG part."""
+    ok, encoded = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 92])
+    if not ok:
+        raise OCRError("Could not encode image for Gemini OCR")
+    return genai_types.Part.from_bytes(
+        data=encoded.tobytes(),
+        mime_type="image/jpeg",
+    )
+
+
+def _script_detection_json(text: str) -> dict:
+    """Parse Gemini's script classification JSON defensively."""
+    cleaned = _clean_ai_transcription(text)
+    if cleaned.startswith("```json") and cleaned.endswith("```"):
+        cleaned = cleaned[7:-3].strip()
+    elif cleaned.startswith("```") and cleaned.endswith("```"):
+        cleaned = cleaned[3:-3].strip()
+
+    try:
+        parsed = json.loads(cleaned)
+    except json.JSONDecodeError:
+        return {
+            "script": "unknown",
+            "confidence": 0.0,
+            "reason": "Invalid script detection response",
+        }
+
+    script = str(parsed.get("script") or "unknown").strip().lower()
+    confidence = parsed.get("confidence", 0.0)
+    try:
+        confidence = float(confidence)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    confidence = max(0.0, min(1.0, confidence))
+    is_special = bool(parsed.get("is_special_lipi")) or script in SPECIAL_SCRIPT_NAMES
+
+    return {
+        "script": script,
+        "confidence": round(confidence, 4),
+        "is_special_lipi": is_special and confidence >= SPECIAL_SCRIPT_MIN_CONFIDENCE,
+        "reason": str(parsed.get("reason") or "").strip(),
+    }
+
+
+def _detect_special_script_with_gemini(image: np.ndarray) -> tuple[dict, str]:
+    """
+    Classify page script before conventional OCR.
+
+    Tesseract's Devanagari/English packs often turn Ranjana, Prachalit, and
+    Tamyig into confident-looking Latin gibberish. A cheap vision preflight
+    lets those pages bypass confidence-based routing entirely.
+    """
+    client = _get_ai_ocr_client()
+    if client is None:
+        raise OCRError("Gemini script preflight is unavailable: API key is not configured")
+
+    image_part = _image_to_gemini_part(image)
+    prompt = """
+Look at the visible text script in this document image.
+
+Classify the main script as exactly one of:
+- devanagari
+- ranjana
+- prachalit
+- tamyig
+- tibetan
+- latin
+- mixed
+- unknown
+
+Important:
+- Ranjana and Prachalit are traditional Nepal Bhasa/Newar lipis.
+- Tamyig may resemble Tibetan script.
+- Do not use OCR output. Judge visually from the glyph shapes.
+- If any meaningful portion is Ranjana, Prachalit, or Tamyig, set is_special_lipi to true.
+
+Return only JSON:
+{"script":"...", "is_special_lipi":true/false, "confidence":0.0, "reason":"short visual reason"}
+""".strip()
+
+    last_error = None
+    for model_name in AI_OCR_MODELS:
+        try:
+            thinking_config = (
+                genai_types.ThinkingConfig(thinking_budget=0)
+                if model_name.startswith("gemini-2.5")
+                else genai_types.ThinkingConfig(
+                    thinking_level=genai_types.ThinkingLevel.MINIMAL
+                )
+            )
+            response = client.models.generate_content(
+                model=model_name,
+                contents=[image_part, prompt],
+                config=genai_types.GenerateContentConfig(
+                    temperature=0.0,
+                    max_output_tokens=512,
+                    response_mime_type="application/json",
+                    thinking_config=thinking_config,
+                    http_options=genai_types.HttpOptions(
+                        timeout=AI_OCR_TIMEOUT_MS,
+                        retry_options=genai_types.HttpRetryOptions(attempts=1),
+                    ),
+                ),
+            )
+            return _script_detection_json(response.text or ""), model_name
+        except Exception as exc:
+            last_error = exc
+            logger.warning(
+                "[AI OCR] script preflight model=%s failed: %s",
+                model_name,
+                exc,
+            )
+
+    raise OCRError(f"All Gemini script preflight models failed: {last_error}")
+
+
+def _transcribe_image_with_gemini(
+    image: np.ndarray,
+    script_hint: str | None = None,
+) -> tuple[str, str]:
     """Strict multimodal transcription used only after conventional OCR fails."""
     client = _get_ai_ocr_client()
     if client is None:
         raise OCRError("Gemini OCR fallback is unavailable: API key is not configured")
 
-    ok, encoded = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 92])
-    if not ok:
-        raise OCRError("Could not encode image for Gemini OCR fallback")
+    image_part = _image_to_gemini_part(image)
 
-    prompt = """
+    if script_hint and (
+        script_hint.lower() in SPECIAL_SCRIPT_NAMES
+        or script_hint.lower() in {"mixed", "special_lipi"}
+    ):
+        script_label = "tamyig/tibetan" if script_hint.lower() == "tibetan" else script_hint
+        prompt = f"""
+Transcribe all readable text in this {script_label} document image.
+
+Rules:
+- Preserve the natural reading order and paragraph/column order.
+- Treat Ranjana, Prachalit, and Tamyig/Tibetan-looking text as valid source text, not decorative noise.
+- Prefer normalized Unicode Devanagari text when the content represents Nepal Bhasa/Newari, Nepali, or Tamang syllables.
+- For Tamyig/Tibetan-looking text, return the readable normalized text/transliteration that best preserves the source wording for translation.
+- Preserve headings, labels, numbers, punctuation, names, and line breaks where useful.
+- Do not translate, summarize, explain, modernize, or rewrite the content.
+- Do not hallucinate missing sentences. Use [...] only for genuinely unreadable text.
+- Ignore non-text decoration and surrounding desk/background outside the document.
+- Return only the transcription, with no markdown fences or commentary.
+""".strip()
+    else:
+        prompt = """
 Transcribe all readable text in this document image verbatim.
 
 Rules:
@@ -259,10 +440,6 @@ Rules:
 - Ignore non-text decoration and surrounding desk/background outside the document.
 - Return only the transcription, with no markdown fences or commentary.
 """.strip()
-    image_part = genai_types.Part.from_bytes(
-        data=encoded.tobytes(),
-        mime_type="image/jpeg",
-    )
 
     last_error = None
     for model_name in AI_OCR_MODELS:
@@ -1367,6 +1544,47 @@ class HybridOCREngine:
             best_result["ocr_diagnostics"] = diagnostics
             return best_result
 
+        should_try_ai_early = False
+        early_ai_reasons = []
+        if best_result is not None:
+            should_try_ai_early, early_ai_reasons = _should_try_ai_before_doctr(
+                best_result["pages"][0],
+            )
+
+        if should_try_ai_early:
+            try:
+                ai_text, ai_model = _transcribe_image_with_gemini(layout_source)
+                ai_page = _make_page_result(ai_text, confidence=0.76)
+                ai_quality = _ocr_page_quality(ai_page)
+                if ai_quality["character_count"] >= max(20, int(best_text_len * 0.15)):
+                    ai_result = _make_result([ai_page])
+                    ai_result["ocr_strategy"] = (
+                        f"gemini_vision_wrong_script_pre_doctr_{ai_model}"
+                    )
+                    ai_result["ocr_diagnostics"] = {
+                        **diagnostics,
+                        "early_ai_reasons": early_ai_reasons,
+                    }
+                    logger.info(
+                        "[AI OCR] accepted before docTR: model=%s, "
+                        "quality=%.4f, reasons=%s",
+                        ai_model,
+                        ai_quality["score"],
+                        ", ".join(early_ai_reasons),
+                    )
+                    return ai_result
+                logger.info(
+                    "[AI OCR] pre-docTR result too short: chars=%d, reasons=%s",
+                    ai_quality["character_count"],
+                    ", ".join(early_ai_reasons),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[AI OCR] pre-docTR fallback unavailable: %s. "
+                    "Continuing to docTR.",
+                    exc,
+                )
+
         # ============================================================
         # SLOW PATH: docTR layout detection + parallel Tesseract on crops
         # Only triggered when Tesseract truly fails (< 100 chars extracted)
@@ -1511,6 +1729,65 @@ class HybridOCREngine:
         artifact removal is evaluated only as a fallback because a page-wide
         color cast can otherwise erase legitimate text.
         """
+        special_script_detection = None
+        try:
+            script_detection, script_model = _detect_special_script_with_gemini(original)
+            special_script_detection = {
+                **script_detection,
+                "model": script_model,
+            }
+            logger.info(
+                "[AI OCR] script preflight: script=%s, special=%s, confidence=%.4f",
+                script_detection.get("script"),
+                script_detection.get("is_special_lipi"),
+                script_detection.get("confidence", 0.0),
+            )
+            if script_detection.get("is_special_lipi"):
+                script_name = script_detection.get("script") or "special_lipi"
+                ai_text, ai_model = _transcribe_image_with_gemini(
+                    original,
+                    script_hint=script_name,
+                )
+                ai_page = _make_page_result(ai_text, confidence=0.76)
+                ai_quality = _ocr_page_quality(ai_page)
+                result = _make_result([ai_page])
+                result["ocr_strategy"] = (
+                    f"gemini_vision_{script_name}_preflight_{ai_model}"
+                )
+                result["ocr_quality"] = {
+                    **ai_quality,
+                    "status": _quality_status(ai_quality["score"]),
+                    "review_required": True,
+                    "message": (
+                        f"{script_name.title()} lipi was detected visually, "
+                        "so AI Vision extracted the text directly instead of "
+                        "trusting conventional OCR."
+                    ),
+                    "selected_variant": "gemini_vision_script_preflight",
+                    "suspicion_reasons": [f"visual_{script_name}_script_detected"],
+                    "script_detection": special_script_detection,
+                    "ai_fallback": {
+                        "attempted": True,
+                        "accepted": True,
+                        "model": ai_model,
+                        "quality": ai_quality,
+                        "trigger_reasons": [f"visual_{script_name}_script_detected"],
+                    },
+                    "candidates": [],
+                }
+                return result
+        except Exception as exc:
+            special_script_detection = {
+                "script": "unknown",
+                "confidence": 0.0,
+                "is_special_lipi": False,
+                "error": str(exc),
+            }
+            logger.info(
+                "[AI OCR] script preflight unavailable; continuing conventional OCR: %s",
+                exc,
+            )
+
         candidate_configs = [
             (
                 "grayscale_deskew",
@@ -1576,6 +1853,13 @@ class HybridOCREngine:
                     "[Adaptive OCR] suspicious result detected: %s",
                     ", ".join(suspicion_reasons),
                 )
+
+            if str(strategy).startswith("gemini_vision_"):
+                logger.info(
+                    "[Adaptive OCR] AI result accepted; skipping remaining "
+                    "image variants"
+                )
+                break
 
             # A strong minimally processed result is the safest and fastest
             # answer; additional transformations cannot add useful certainty.
@@ -1720,6 +2004,7 @@ class HybridOCREngine:
             "message": quality_message,
             "selected_variant": best["variant"],
             "suspicion_reasons": suspicion_reasons,
+            "script_detection": special_script_detection,
             "ai_fallback": ai_fallback,
             "candidates": [
                 {
